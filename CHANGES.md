@@ -1,5 +1,49 @@
 # SEC 10-K Analyzer — Changes
 
+## Pass 5: is the buy score worth anything? (backtest + v2 weights)
+
+**Short answer: v1 wasn't; v2 points the right way but isn't proven.**
+
+- **Point-in-time data layer (`backend/point_in_time.py`)** — every
+  accessor takes an `as_of` date and only uses SEC facts *filed* by then
+  (restatements can't leak back), filings filed by then, and prices up to
+  then. Market cap lines filing share counts up with split-adjusted prices
+  (NVIDIA mid-2020: $234B, not $6B); falls back to balance-sheet shares
+  when a company (Alphabet) reports no cover-page count. The live score's
+  new factors call the same functions with `as_of = today`.
+- **Backtest (`backend/backtest.py`, `pages/4_Score_Validation.py`)** —
+  rebuilds the scanner at 35 quarter ends (2017-2026) over the 17-name
+  supplier universe and scores it with the live `compute_buy_score`.
+  Reports per-factor rank IC with t-stats, true/false splits, and a top-5
+  quarterly strategy vs the equal-weight universe and SPY.
+- **v1 result:** score IC -0.065 (t -1.4); top-5 46%/yr vs universe 51%.
+  Stocks matched via mega-cap filings did *worse* than unmatched ones,
+  driven by 2025-26, when the memory names (MU, WDC, SNDK) the scanner
+  never matched beat the universe by 29-82% per quarter.
+- **v2 weights, fixed before re-testing** (see `scoring.py` docstring):
+  new *supplier's own tightness* factor (25) reads the supplier's latest
+  10-K/10-Q MD&A for constrained supply / rising prices / allocation; new
+  *growth-adjusted valuation* (15), the only factor positive in both
+  halves of the sample; volume spike and revenue-leader proxy dropped to
+  info-only. M&A agreements no longer count as deals.
+- **v2 result:** score IC +0.044 (t 1.0); top-5 67%/yr vs universe 51%,
+  beating it in 21 of 35 quarters (~13% chance by luck). Better, not
+  statistically proven. The tightness factor idea came from looking at
+  the memory miss in this same data, so this isn't a clean test.
+- **Live scanner now scores the whole supplier universe**, not only names
+  a mega-cap filing pointed to — the matched-only version still trails the
+  universe (43% vs 53%/yr), and that gate is what hid MU and SNDK.
+- **Track record** — each scan now records scores and prices; the Score
+  Validation page follows them forward. The only evidence with no
+  backtest hindsight; it needs months to mean anything.
+- The Buy Scores tab shows the score's backtest IC up front and each
+  factor's IC next to it.
+
+Known gap: ASML files a 20-F (foreign issuer, IFRS), so it has no
+valuation or tightness data and scores near zero for lack of data.
+
+Tests: `test_backtest.py` (6 offline tests) is new; 31 tests pass.
+
 ## Pass 4: first run against real data — detection fixes + 13F smart money
 
 First time the whole pipeline ran against live SEC / yfinance data (Passes

@@ -361,8 +361,8 @@ else:
 
             if financing:
                 with st.expander(
-                    f"🏦 Financing & other Item 1.01 agreements ({len(financing)}) — "
-                    "debt, credit facilities, note offerings; not counted as deals"
+                    f"🏦 Financing, M&A & other Item 1.01 agreements ({len(financing)}) — "
+                    "debt, note offerings, mergers, asset sales; not counted as demand deals"
                 ):
                     for d in financing:
                         st.markdown(f"**{d['ticker']} — {d['headline']}**")
@@ -390,26 +390,55 @@ else:
             "shown elsewhere on this page — not a prediction or a recommendation. "
             "Click a row's ticker below to see exactly where its points came from."
         )
+        evidence = results.get("score_evidence")
+        if evidence and evidence.get("score") and evidence["score"].get("mean_ic") is not None:
+            ic, t = evidence["score"]["mean_ic"], evidence["score"]["t_stat"]
+            verdict = ("predicted relative returns" if ic > 0 and t is not None and t >= 2 else
+                       "has NOT shown predictive value yet" if ic <= 0 or t is None or t < 1
+                       else "shows a weak, not-yet-significant edge")
+            (st.success if "predicted" in verdict and "NOT" not in verdict else st.warning)(
+                f"**How much to trust this score:** in the backtest ({evidence['period']}), it {verdict} "
+                f"(IC {ic:+.3f}, t-stat {t}). See the **Score Validation** page for details."
+            )
+        else:
+            st.info("This score hasn't been backtested yet. Run one on the **Score Validation** page "
+                    "before relying on it.")
+
+        def _evidence_note(key):
+            f = (evidence or {}).get("factors", {}).get(key)
+            if not f or f.get("mean_ic") is None:
+                return ""
+            return f" · *backtest IC {f['mean_ic']:+.2f} (t {f['t_stat']})*"
+
         buy_scores = results.get("buy_scores", [])
         if not buy_scores:
             st.info("No candidate suppliers were matched this run, so there's nothing to score yet.")
         else:
+            def _pe(s):
+                ey = (s.get("valuation") or {}).get("earnings_yield")
+                return round(1 / ey, 1) if ey and ey > 0 else None
+
             score_rows = [
                 {
                     "Ticker": s["ticker"],
                     "Score": s["score"],
-                    "Mega-Cap Signal": s.get("mega_cap_ticker"),
+                    "Own tightness": (s.get("own_tightness") or {}).get("mentions"),
+                    "P/E": _pe(s),
+                    "Rev growth (FY)": (s.get("valuation") or {}).get("revenue_growth_annual"),
+                    "Flagged by mega-cap": s.get("mega_cap_ticker") if s.get("matched", True) else "—",
                     "Industry": s.get("industry_label") or "—",
                     "Caution Flags": len(s.get("caution_flags", [])),
                 }
                 for s in sorted(buy_scores, key=lambda x: x["score"], reverse=True)
             ]
-            st.dataframe(pd.DataFrame(score_rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(score_rows), width="stretch", hide_index=True)
 
             for s in sorted(buy_scores, key=lambda x: x["score"], reverse=True):
                 with st.expander(f"{s['ticker']} — score {s['score']}/100 breakdown"):
                     for b in s["breakdown"]:
-                        st.write(f"- **+{b['points']}/{b['max']}** {b['factor']} — {b['why']}")
+                        pts = f"+{b['points']}/{b['max']}" if b["max"] else "info"
+                        st.write(f"- **{pts}** {b['factor']} — {b['why']}"
+                                 f"{_evidence_note(b.get('key'))}")
                     if s.get("caution_flags"):
                         st.markdown("**⚠️ Caution flags:**")
                         for flag in s["caution_flags"]:

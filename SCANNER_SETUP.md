@@ -19,6 +19,8 @@ backend/
   deal_monitor.py          SEC 8-K deal detection + best-effort news leads
   scoring.py               transparent buy score + caution flags
   institutional_holdings.py  13F "smart money" tracker (Pass 4)
+  point_in_time.py         "what was known on date X" data layer (Pass 5)
+  backtest.py              quarterly backtest of the buy score (Pass 5)
   market_screener.py       yfinance technical screener
   scanner_pipeline.py      orchestrates everything above
   main.py                  FastAPI app
@@ -26,6 +28,7 @@ pages/
   1_Bottleneck_Scanner.py       main scanner page (auto-appears in the sidebar nav)
   2_Historical_Trend_Lookup.py  standalone multi-year lookup for any ticker
   3_Smart_Money_13F.py          what well-known investors bought/sold last quarter
+  4_Score_Validation.py         backtest of the buy score + live track record
 requirements-scanner.txt   (unchanged this pass — no new dependencies)
 ```
 

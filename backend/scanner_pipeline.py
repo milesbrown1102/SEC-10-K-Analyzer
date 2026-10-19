@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from . import (
     capex_pipeline, bottleneck_detector, supplier_matcher, market_screener,
-    deal_monitor, scoring, db, sec_utils,
+    deal_monitor, scoring, db, sec_utils, point_in_time,
 )
 
 DEFAULT_WATCHLIST = ["MSFT", "META", "GOOGL", "AMZN", "AAPL"]
@@ -39,11 +39,15 @@ def run_full_scan(watchlist: Optional[List[str]] = None, include_news_leads: boo
 
         supplier_matcher.run_spinoff_monitor(session, run_id)
 
+        # Score the whole supplier universe, not only names a mega-cap
+        # filing pointed to: in the backtest, gating on that match was the
+        # weakest part of the pipeline, while the supplier's own filings
+        # caught what the mega-caps never mentioned (memory, 2025-26).
         supplier_tickers = sorted({
             match["supplier_ticker"]
             for sig in signals
             for match in sig.get("suppliers", [])
-        })
+        } | set(supplier_universe()))
         if supplier_tickers:
             market_screener.screen_many(supplier_tickers)
 
@@ -65,6 +69,10 @@ def run_full_scan(watchlist: Optional[List[str]] = None, include_news_leads: boo
         raise
 
     return run_id
+
+
+def supplier_universe() -> List[str]:
+    return sorted({t for entry in supplier_matcher.SUPPLIER_TAXONOMY for t in entry["suppliers"]})
 
 
 def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
@@ -103,13 +111,38 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
             if supplier.get("market_control_rank") and entry["market_control_rank"] is None:
                 entry["market_control_rank"] = supplier["market_control_rank"]
 
+    # Universe names no mega-cap filing pointed to are still scored — on
+    # their own filings, valuation and price — with 0 for the mega-cap factors.
+    for entry in supplier_matcher.SUPPLIER_TAXONOMY:
+        for ticker in entry["suppliers"]:
+            if ticker not in by_ticker:
+                by_ticker[ticker] = {
+                    "best_confidence": 0.0, "thesis_intact": False, "mega_caps": set(),
+                    "industries": {entry["category_label"]}, "market_control_rank": None,
+                    "unmatched": True,
+                }
+            elif by_ticker[ticker].get("unmatched"):
+                by_ticker[ticker]["industries"].add(entry["category_label"])
+
     deal_events = db.get_deal_events(tickers=list(by_ticker.keys())) if by_ticker else []
     deal_tickers_confirmed = {e["ticker"] for e in deal_events if e["source"] == "sec_8k"}
+
+    # Same point-in-time code the backtest validates, with as_of = today.
+    session = sec_utils.make_sec_session()
+    today = point_in_time.today()
 
     scores = []
     for ticker, ctx in by_ticker.items():
         market_data = db.cache_get("market_screen", ticker, ttl_seconds=None)
         confirmed_deal = ticker in deal_tickers_confirmed
+        try:
+            valuation = point_in_time.valuation(ticker, today, session)
+        except Exception:
+            valuation = None
+        try:
+            tightness = bottleneck_detector.supplier_tightness(ticker, today, session)
+        except Exception:
+            tightness = None
 
         score = scoring.compute_buy_score(
             ticker=ticker,
@@ -118,13 +151,22 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
             market_data=market_data,
             confirmed_deal=confirmed_deal,
             market_control_rank=ctx["market_control_rank"],
+            valuation=valuation,
+            own_tightness=tightness,
         )
         score["caution_flags"] = scoring.compute_caution_flags(
             signal_confidence=ctx["best_confidence"],
             market_data=market_data,
             confirmed_deal=confirmed_deal,
+            valuation=valuation,
         )
-        score["mega_cap_ticker"] = ", ".join(sorted(ctx["mega_caps"]))
+        score["valuation"] = valuation
+        score["own_tightness"] = tightness
+        # Recorded for the live track record (Score Validation page).
+        score["scan_date"] = today
+        score["price_at_scan"] = point_in_time.price_on(ticker, today)
+        score["matched"] = not ctx.get("unmatched", False)
+        score["mega_cap_ticker"] = ", ".join(sorted(ctx["mega_caps"])) or "—"
         score["industry_label"] = ", ".join(sorted(ctx["industries"])) or None
         scores.append(score)
 
@@ -146,7 +188,7 @@ def get_scan_results(run_id: int) -> Dict:
         match["supplier_ticker"]
         for sig in signals
         for match in sig.get("suppliers", [])
-    })
+    } | {s["ticker"] for s in db.cache_get(f"buy_scores_{run_id}", "all", ttl_seconds=None) or []})
     market_data = {
         t: db.cache_get("market_screen", t, ttl_seconds=None) for t in supplier_tickers
     }
@@ -167,4 +209,62 @@ def get_scan_results(run_id: int) -> Dict:
         "spinoffs": spinoffs,
         "deals": deals,
         "buy_scores": buy_scores,
+        "score_evidence": _score_evidence(),
     }
+
+
+def _score_evidence() -> Optional[Dict]:
+    from . import backtest  # local import: backtest imports this module
+    try:
+        return backtest.factor_evidence()
+    except Exception:
+        return None
+
+
+def get_track_record(limit_runs: int = 200) -> Dict:
+    """
+    Every scored pick from past scans that recorded a price, with its return
+    since the scan and SPY's over the same period. This is the evidence
+    with no backtest hindsight in it — it only accumulates going forward.
+    """
+    today = point_in_time.today()
+    picks = []
+    for run in db.list_scan_runs(limit_runs):
+        if run.get("status") != "completed":
+            continue
+        for s in db.cache_get(f"buy_scores_{run['id']}", "all", ttl_seconds=None) or []:
+            if not s.get("price_at_scan") or not s.get("scan_date"):
+                continue  # scans before track recording existed
+            now = point_in_time.price_on(s["ticker"], today)
+            spy_then = point_in_time.price_on("SPY", s["scan_date"])
+            spy_now = point_in_time.price_on("SPY", today)
+            picks.append({
+                "run_id": run["id"], "scan_date": s["scan_date"], "ticker": s["ticker"],
+                "score": s["score"], "price_at_scan": s["price_at_scan"], "price_now": now,
+                "return_pct": round((now / s["price_at_scan"] - 1) * 100, 2) if now else None,
+                "spy_return_pct": round((spy_now / spy_then - 1) * 100, 2)
+                if spy_now and spy_then else None,
+            })
+
+    # Several scans on one day would count the same pick repeatedly; keep
+    # the latest scan per (day, ticker).
+    dedup = {}
+    for p in sorted(picks, key=lambda p: p["run_id"]):
+        dedup[(p["scan_date"], p["ticker"])] = p
+    picks = sorted(dedup.values(), key=lambda p: (p["scan_date"], -p["score"]), reverse=True)
+
+    with_returns = [p for p in picks if p["return_pct"] is not None]
+    summary = None
+    if with_returns:
+        scores = sorted(p["score"] for p in with_returns)
+        split = scores[len(scores) // 2]
+        high = [p["return_pct"] for p in with_returns if p["score"] >= split]
+        low = [p["return_pct"] for p in with_returns if p["score"] < split]
+        spy = [p["spy_return_pct"] for p in with_returns if p["spy_return_pct"] is not None]
+        summary = {
+            "n": len(with_returns), "split": split,
+            "high_avg": round(sum(high) / len(high), 2) if high else 0.0,
+            "low_avg": round(sum(low) / len(low), 2) if low else 0.0,
+            "spy_avg": round(sum(spy) / len(spy), 2) if spy else 0.0,
+        }
+    return {"picks": picks, "summary": summary}

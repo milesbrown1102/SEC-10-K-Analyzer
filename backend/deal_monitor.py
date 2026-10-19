@@ -61,9 +61,18 @@ ITEM_101_HEADING_RE = re.compile(
 )
 NEXT_ITEM_RE = re.compile(r"\bitem\s*\d\.\d\d\b", re.IGNORECASE)
 COMMERCIAL_RE = re.compile(
-    r"\b(?:partnership|supply|purchase\s+(?:of|commitment)|offtake|power\s+purchase"
-    r"|capacity|collaboration|licens(?:e|ing)|joint\s+venture|acquisition|acquire"
-    r"|merger|customer|strategic|data\s*cent(?:er|re)|lease\s+of|manufactur)\w*",
+    r"\b(?:partnership|supply|purchase\s+commitment|offtake|power\s+purchase"
+    r"|capacity|collaboration|licens(?:e|ing)|joint\s+venture"
+    r"|customer|strategic|data\s*cent(?:er|re)|lease\s+of|manufactur)\w*",
+    re.IGNORECASE,
+)
+# Buying or selling businesses/assets: a corporate event, not evidence of
+# customer demand (NRG's 2023 sale of its nuclear stake to Constellation
+# was being counted as a "commercial deal").
+M_AND_A_RE = re.compile(
+    r"\b(?:merger|mergers|merger\s+sub|acquisition|acquire[sd]?"
+    r"|(?:equity|stock|share|asset|membership\s+interest|unit)\s+purchase\s+agreement"
+    r"|purchase\s+and\s+sale\s+agreement|divest\w*|tender\s+offer|sale\s+of\s+(?:its|the|our))\b",
     re.IGNORECASE,
 )
 FINANCING_RE = re.compile(
@@ -97,7 +106,7 @@ def _extract_deal_snippet(text: str) -> Optional[str]:
 
 def classify_item_101(text: str) -> Optional[Dict]:
     """
-    Pure function. Returns {'deal_type': 'commercial'|'financing'|'other',
+    Pure function. Returns {'deal_type': 'commercial'|'m_and_a'|'financing'|'other',
     'evidence': <start of the Item 1.01 body>} or None if this 8-K has no
     Item 1.01 section. Classification reads the opening of the body: a
     commercial partnership that mentions credit support further down (as
@@ -116,7 +125,10 @@ def classify_item_101(text: str) -> Optional[Dict]:
 
     commercial = len(COMMERCIAL_RE.findall(opening))
     financing = len(FINANCING_RE.findall(opening))
-    if commercial and commercial >= financing:
+    m_and_a = len(M_AND_A_RE.findall(opening))
+    if m_and_a and m_and_a >= commercial and m_and_a >= financing:
+        deal_type = "m_and_a"
+    elif commercial and commercial >= financing:
         deal_type = "commercial"
     elif financing:
         deal_type = "financing"
@@ -154,9 +166,10 @@ def check_8k_deals_for_ticker(ticker: str, session: requests.Session,
             # Non-standard heading wording — fall back to the keyword snippet.
             classified = {"deal_type": "other", "evidence": _extract_deal_snippet(text)}
         if classified:
-            source = {"commercial": "sec_8k", "financing": "sec_8k_financing"}.get(
-                classified["deal_type"], "sec_8k_other")
+            source = {"commercial": "sec_8k", "financing": "sec_8k_financing",
+                      "m_and_a": "sec_8k_m_and_a"}.get(classified["deal_type"], "sec_8k_other")
             label = {"sec_8k": "commercial agreement", "sec_8k_financing": "financing",
+                     "sec_8k_m_and_a": "merger / acquisition / asset sale",
                      "sec_8k_other": "other agreement"}[source]
             hits.append({
                 "ticker": ticker,

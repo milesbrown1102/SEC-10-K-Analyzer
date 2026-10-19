@@ -51,9 +51,14 @@ def test_buy_score_breakdown_sums_to_total():
                      "quarterly_revenue_growth_pct": 30.0},
         confirmed_deal=True,
         market_control_rank=1,
+        valuation={"growth_adjusted_sales_yield": 10.0, "sales_yield": 0.2,
+                   "revenue_growth_annual": 50.0},
+        own_tightness={"mentions": 3, "form": "10-Q",
+                       "evidence": ["Demand continues to exceed supply."]},
     )
     assert result["score"] == sum(b["points"] for b in result["breakdown"])
-    assert result["score"] == 100, result  # every factor maxed out
+    assert result["score"] == 100, result  # every scored factor maxed out
+    assert sum(b["max"] for b in result["breakdown"]) == 100
     print(f"PASS test_buy_score_breakdown_sums_to_total (score={result['score']})")
 
 

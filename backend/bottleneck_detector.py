@@ -15,7 +15,7 @@ section quality is consistent across both features.
 
 import re
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
@@ -216,6 +216,92 @@ def detect_bottleneck_signals(sections: Dict[str, str]) -> List[Dict]:
 
     signals.sort(key=lambda s: -s["confidence"])
     return signals
+
+
+# =============================================================================
+# Supplier-side tightness: is the SUPPLIER itself reporting that demand is
+# outrunning what it can supply? Read from its own MD&A (management's
+# account of actual conditions, not hypothetical risk factors). Pricing
+# power and backlog are the observable consequences of a bottleneck, and
+# appear in the supplier's filings before or regardless of whether any
+# mega-cap names the constraint (Micron, 2025: "constrained supply has led
+# to increased pricing" — no mega-cap 10-K mentioned memory).
+# =============================================================================
+
+TIGHTNESS_CUES = re.compile(
+    r"\b(?:demand\s+(?:continues?\s+to\s+|continued\s+to\s+)?(?:exceed(?:s|ed|ing)?|outpac(?:es|ed|ing))"
+    r"\s+(?:our\s+|industry\s+|available\s+)*(?:supply|capacity|production)"
+    r"|(?:tight|tighter|tightening|constrained|limited)\s+(?:industry\s+|market\s+)?supply"
+    r"|supply\s+(?:remains?\s+|is\s+|was\s+|has\s+been\s+)?(?:tight|constrained|limited)"
+    r"|supply[\s-]constrained|capacity[\s-]constrained"
+    r"|(?:increased|increases\s+in|higher|favorable|improved|strong(?:er)?|rising)\s+"
+    r"(?:average\s+selling\s+)?pric(?:es|ing)"
+    r"|price\s+increases|pricing\s+power"
+    r"|record\s+(?:backlog|orders|bookings)|backlog\s+(?:increased|grew|reached|of\s+\$)"
+    r"|sold\s+out|fully\s+(?:booked|allocated|committed|contracted)"
+    r"|(?:we\s+are|we\s+were|we\s+remain(?:ed)?)\s+(?:still\s+)?(?:supply[\s-])?constrained"
+    r"|prepa(?:id|yments?\s+for)\s+(?:supply|capacity)"
+    r"|(?:customer|product)\s+allocations?)\b",
+    re.IGNORECASE,
+)
+# Price/pricing cues about what the company PAYS mean cost pressure, the
+# opposite of pricing power.
+_COST_CONTEXT = re.compile(
+    r"\b(?:costs?|raw\s+materials?|inputs?|inflation\w*|commodit\w+|freight|fuel"
+    r"|we\s+pay|we\s+paid|purchase\s+prices?|labor)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_own_tightness(mda_text: str) -> Dict:
+    """Pure function. {'mentions': distinct tightness sentences, 'evidence': up to 3}."""
+    hits = []
+    seen = set()
+    for sent in _sentences(mda_text or ""):
+        if sent in seen or not TIGHTNESS_CUES.search(sent):
+            continue
+        if _COST_CONTEXT.search(sent) and not re.search(r"(?i)\bsupply\b", sent):
+            continue
+        seen.add(sent)
+        hits.append(sent[:400])
+    return {"mentions": len(hits), "evidence": hits[:3]}
+
+
+def scan_own_filing(content: str, form: str) -> Dict:
+    """Tightness from a supplier's own 10-K (Item 7) or 10-Q (Part I, Item 2) MD&A."""
+    sections = extract_all_sections(content, max_chars=None)
+    mda = sections.get("item_2") if form.startswith("10-Q") else sections.get("mda")
+    if not mda or len(mda) < 5000:
+        mda = content  # extraction failed — scan everything rather than nothing
+    return detect_own_tightness(mda)
+
+
+TIGHTNESS_CACHE_VERSION = "v1"
+
+
+def supplier_tightness(ticker: str, as_of: str, session: requests.Session) -> Optional[Dict]:
+    """
+    Tightness language in a supplier's latest 10-K/10-Q filed by as_of —
+    shared by the live score (as_of = today) and the backtest. Cached per
+    filing, since a filed document never changes.
+    """
+    from . import point_in_time as pit  # local import: point_in_time is a peer module
+
+    cik = sec_utils.get_cik_for_ticker(ticker, session)
+    filing = pit.latest_periodic(cik, as_of, session) if cik else None
+    if not filing:
+        return None
+    key = f"{TIGHTNESS_CACHE_VERSION}_{cik}_{filing['accession_number']}"
+    cached = db.cache_get("backtest_tightness", key, ttl_seconds=None)
+    if cached is None:
+        text = sec_utils.fetch_filing_text(cik, filing, session)
+        if not text:
+            return None
+        cached = scan_own_filing(text, filing["form"])
+        cached["form"] = filing["form"]
+        cached["filing_date"] = filing["filing_date"]
+        db.cache_set("backtest_tightness", key, cached)
+    return cached
 
 
 def scan_filing_text(content: str) -> List[Dict]:

@@ -24,7 +24,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import db, historical_pipeline, institutional_holdings, scanner_pipeline, sec_utils
+from . import backtest, db, historical_pipeline, institutional_holdings, scanner_pipeline, sec_utils
 
 app = FastAPI(title="SEC 10-K Analyzer — Bottleneck Scanner API", version="0.1.0")
 
@@ -100,6 +100,11 @@ def scan_results(run_id: int):
     if not results:
         raise HTTPException(status_code=404, detail=f"No scan run with id {run_id}")
     return results
+
+
+@app.get("/scanner/track-record")
+def track_record():
+    return scanner_pipeline.get_track_record()
 
 
 @app.get("/scanner/latest")
@@ -220,3 +225,50 @@ def institutions_scanner_overlap():
         "buy_scores": {b["ticker"]: b["score"] for b in scores},
         "holders": institutional_holdings.holdings_for_tickers(report, tickers),
     }
+
+
+# =============================================================================
+# Backtest — does the buy score predict anything? Background task; the
+# first run downloads ~8 years of filings and prices (several minutes),
+# later runs reuse the cache.
+# =============================================================================
+
+_bt_lock = threading.Lock()
+_bt_state = {"in_progress": False, "done": 0, "total": 0, "current": None, "error": None}
+
+
+def _run_backtest_background():
+    def progress(done, total, current):
+        _bt_state.update(done=done, total=total, current=current)
+    try:
+        backtest.run_backtest(progress=progress)
+        _bt_state["error"] = None
+    except Exception as e:
+        _bt_state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with _bt_lock:
+            _bt_state["in_progress"] = False
+
+
+@app.post("/backtest/run")
+def start_backtest(background_tasks: BackgroundTasks):
+    with _bt_lock:
+        if _bt_state["in_progress"]:
+            raise HTTPException(status_code=409, detail="A backtest is already running.")
+        _bt_state.update(in_progress=True, done=0, total=0, current=None, error=None)
+    background_tasks.add_task(_run_backtest_background)
+    return {"status": "started"}
+
+
+@app.get("/backtest/status")
+def backtest_status():
+    report = backtest.get_latest_report()
+    return {**_bt_state, "generated_at": report["generated_at"] if report else None}
+
+
+@app.get("/backtest/latest")
+def latest_backtest():
+    report = backtest.get_latest_report()
+    if not report:
+        raise HTTPException(status_code=404, detail="No backtest yet — POST /backtest/run first")
+    return report
