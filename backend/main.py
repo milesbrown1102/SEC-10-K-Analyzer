@@ -24,7 +24,10 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import backtest, db, historical_pipeline, institutional_holdings, scanner_pipeline, sec_utils
+from . import (
+    backtest, bottleneck_detector, db, historical_pipeline, industry_radar,
+    institutional_holdings, point_in_time, scanner_pipeline, scoring, sec_utils,
+)
 
 app = FastAPI(title="SEC 10-K Analyzer — Bottleneck Scanner API", version="0.1.0")
 
@@ -272,3 +275,104 @@ def latest_backtest():
     if not report:
         raise HTTPException(status_code=404, detail="No backtest yet — POST /backtest/run first")
     return report
+
+
+# =============================================================================
+# Industry Radar — tightness language across ALL SEC filers, by industry.
+# =============================================================================
+
+_radar_lock = threading.Lock()
+_radar_state = {"in_progress": False, "error": None}
+
+
+def _run_radar_background():
+    try:
+        industry_radar.run_radar()
+        _radar_state["error"] = None
+    except Exception as e:
+        _radar_state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with _radar_lock:
+            _radar_state["in_progress"] = False
+
+
+@app.post("/radar/run")
+def start_radar(background_tasks: BackgroundTasks):
+    with _radar_lock:
+        if _radar_state["in_progress"]:
+            raise HTTPException(status_code=409, detail="The radar is already running.")
+        _radar_state.update(in_progress=True, error=None)
+    background_tasks.add_task(_run_radar_background)
+    return {"status": "started"}
+
+
+@app.get("/radar/status")
+def radar_status():
+    report = industry_radar.get_latest_report()
+    return {**_radar_state, "generated_at": report["generated_at"] if report else None}
+
+
+@app.get("/radar/latest")
+def latest_radar():
+    report = industry_radar.get_latest_report()
+    if not report:
+        raise HTTPException(status_code=404, detail="No radar yet — POST /radar/run first")
+    return report
+
+
+@app.get("/radar/company/{ticker}")
+def radar_company(ticker: str):
+    """
+    Drill-down for any ticker: the full tightness detector on its latest
+    10-K/10-Q, valuation, growth, trend, a standalone buy score (no
+    mega-cap context), and which tracked funds hold it.
+    """
+    ticker = ticker.strip().upper()
+    session = sec_utils.make_sec_session()
+    cik = sec_utils.get_cik_for_ticker(ticker, session)
+    if not cik:
+        raise HTTPException(status_code=404, detail=f"No SEC filer found for '{ticker}'")
+    today = point_in_time.today()
+    tightness = bottleneck_detector.supplier_tightness(ticker, today, session)
+    valuation = point_in_time.valuation(ticker, today, session)
+    tech = point_in_time.technicals(ticker, today)
+    rev = point_in_time.quarterly_revenue_yoy(cik, today, session)
+    market = {"relative_volume": tech["relative_volume"], "above_200sma": tech["above_200sma"],
+              "quarterly_revenue_growth_pct": rev}
+    score = scoring.compute_buy_score(
+        ticker=ticker, thesis_intact=False, signal_confidence=0.0, market_data=market,
+        confirmed_deal=False, valuation=valuation, own_tightness=tightness)
+    # The mega-cap "low-confidence signal" flag doesn't apply to a standalone lookup.
+    score["caution_flags"] = [f for f in scoring.compute_caution_flags(0.0, market, False, valuation)
+                              if not f.startswith("Low-confidence bottleneck signal")]
+    report = institutional_holdings.get_latest_report()
+    holders = institutional_holdings.holdings_for_tickers(report, [ticker])[ticker] if report else []
+    return {"ticker": ticker, "cik": cik, "tightness": tightness, "valuation": valuation,
+            "technicals": tech, "quarterly_revenue_growth_pct": rev, "score": score,
+            "fund_holders": holders,
+            "in_universe": ticker in scanner_pipeline.supplier_universe()}
+
+
+class UniverseItem(BaseModel):
+    ticker: str
+    note: str = ""
+
+
+@app.get("/universe")
+def get_universe():
+    return {"taxonomy": sorted({t for e in scanner_pipeline.supplier_matcher.SUPPLIER_TAXONOMY
+                                for t in e["suppliers"]}),
+            "custom": industry_radar.get_custom_universe()}
+
+
+@app.post("/universe")
+def add_universe(item: UniverseItem):
+    session = sec_utils.make_sec_session()
+    if not sec_utils.get_cik_for_ticker(item.ticker, session):
+        raise HTTPException(status_code=404, detail=f"No SEC filer found for '{item.ticker}'")
+    return {"custom": industry_radar.add_to_universe(item.ticker, item.note)}
+
+
+@app.delete("/universe/{ticker}")
+def remove_universe(ticker: str):
+    return {"custom": industry_radar.remove_from_universe(ticker)}

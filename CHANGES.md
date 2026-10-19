@@ -1,5 +1,34 @@
 # SEC 10-K Analyzer — Changes
 
+## Pass 6: widen — Industry Radar across every SEC filer
+
+The backtest pointed here: the promising signal is a company's own filing
+reporting tight supply, and nothing about that is specific to AI or to a
+17-name list. Instead of adding hand-written "theme packs" to the
+mega-cap detector (the part the backtest found weakest), this scans
+every filer.
+
+- **Industry Radar (`backend/industry_radar.py`, `pages/5_Industry_Radar.py`)**
+  — SEC full-text search over every 10-K/10-Q in the last 12 months vs
+  the 12 before, for 13 seller-side phrases (own product scarce: "demand
+  exceeds supply", "pricing power", "record backlog"...) and 4 buyer-side
+  ones (inputs scarce: "extended lead times", "power availability"...),
+  aggregated by SIC industry. About a minute per run; settled windows are
+  cached forever. First run surfaced small modular reactors (0 -> 3
+  companies), space launch (0 -> 5), on-site power / fuel cells (1 -> 5),
+  and "power availability" across 24 -> 59 companies — software, bitcoin
+  miners, construction contractors.
+- **Company drill-down** — full sentence-level tightness detector on the
+  company's latest 10-K/10-Q, valuation, growth, a standalone buy score,
+  and which tracked 13F funds hold it. Phrase hits and real tightness
+  differ (Bloom Energy: radar hit, 0 tightness sentences, 33x sales).
+- **Scored universe** — companies added from the drill-down are scored by
+  the Scanner on every run and enter the live track record. The backtest
+  universe stays fixed so results remain comparable.
+
+Not backtested: a discovery tool for where to look. Tests:
+`test_industry_radar.py` (4 offline tests); 35 tests pass.
+
 ## Pass 5: is the buy score worth anything? (backtest + v2 weights)
 
 **Short answer: v1 wasn't; v2 points the right way but isn't proven.**

@@ -21,6 +21,7 @@ backend/
   institutional_holdings.py  13F "smart money" tracker (Pass 4)
   point_in_time.py         "what was known on date X" data layer (Pass 5)
   backtest.py              quarterly backtest of the buy score (Pass 5)
+  industry_radar.py        SEC full-text-search industry radar (Pass 6)
   market_screener.py       yfinance technical screener
   scanner_pipeline.py      orchestrates everything above
   main.py                  FastAPI app
@@ -29,6 +30,7 @@ pages/
   2_Historical_Trend_Lookup.py  standalone multi-year lookup for any ticker
   3_Smart_Money_13F.py          what well-known investors bought/sold last quarter
   4_Score_Validation.py         backtest of the buy score + live track record
+  5_Industry_Radar.py           tightness language across every SEC filer, by industry
 requirements-scanner.txt   (unchanged this pass — no new dependencies)
 ```
 

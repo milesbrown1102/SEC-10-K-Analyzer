@@ -72,7 +72,10 @@ def run_full_scan(watchlist: Optional[List[str]] = None, include_news_leads: boo
 
 
 def supplier_universe() -> List[str]:
-    return sorted({t for entry in supplier_matcher.SUPPLIER_TAXONOMY for t in entry["suppliers"]})
+    """Hand-picked taxonomy suppliers plus anything added from the Industry Radar."""
+    from . import industry_radar  # local import keeps module load order simple
+    taxonomy = {t for entry in supplier_matcher.SUPPLIER_TAXONOMY for t in entry["suppliers"]}
+    return sorted(taxonomy | {i["ticker"] for i in industry_radar.get_custom_universe()})
 
 
 def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
@@ -123,6 +126,13 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
                 }
             elif by_ticker[ticker].get("unmatched"):
                 by_ticker[ticker]["industries"].add(entry["category_label"])
+    from . import industry_radar
+    for item in industry_radar.get_custom_universe():
+        by_ticker.setdefault(item["ticker"], {
+            "best_confidence": 0.0, "thesis_intact": False, "mega_caps": set(),
+            "industries": {"Added from radar" + (f": {item['note']}" if item.get("note") else "")},
+            "market_control_rank": None, "unmatched": True,
+        })
 
     deal_events = db.get_deal_events(tickers=list(by_ticker.keys())) if by_ticker else []
     deal_tickers_confirmed = {e["ticker"] for e in deal_events if e["source"] == "sec_8k"}
