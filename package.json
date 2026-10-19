@@ -1,0 +1,23 @@
+{
+  "name": "financeprojects",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/milesbrown1102/SEC-10-K-Analyzer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/milesbrown1102/SEC-10-K-Analyzer/issues"
+  },
+  "homepage": "https://github.com/milesbrown1102/SEC-10-K-Analyzer#readme",
+  "dependencies": {
+    "localtunnel": "^2.0.2"
+  }
+}

@@ -5,7 +5,7 @@ Finds ALL sections regardless of company-specific formatting
 """
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 @dataclass
@@ -19,75 +19,84 @@ class Section:
     word_count: int
     char_count: int
 
-def extract_all_sections(content: str) -> Dict[str, str]:
+# Canonical 10-K item order. Section boundaries are only ever the heading
+# of a LATER item, so repeated page headers ("PART II / Item 7" on every
+# MD&A page in Microsoft's filings) and mentions of earlier items don't
+# split a section.
+ITEM_ORDER = ['1', '1a', '1b', '1c', '2', '3', '4', '5', '6', '7', '7a',
+              '8', '9', '9a', '9b', '9c', '10', '11', '12', '13', '14', '15', '16']
+_ITEM_RANK = {item: i for i, item in enumerate(ITEM_ORDER)}
+
+# "Item 7." / "ITEM 1A" at the start of a line (optionally after "Part II,").
+# The title is NOT required on the same line — Alphabet's filings put it on
+# the next line — and mid-sentence cross-references ("see Part II, Item 7
+# of this Form 10-K") are excluded by the line-start anchor.
+_HEADING_RE = re.compile(
+    r'(?im)^[ \t\xa0]*(?:part\s+[iv]+[,.\s]+)?item[\s\xa0]*(\d{1,2}[a-c]?)\b\.?'
+)
+
+
+def find_item_spans(content: str) -> Dict[str, Tuple[int, int]]:
+    """
+    Returns {item_number: (start, end)} for each 10-K item found.
+
+    Every line-start "Item N" is a candidate start; a candidate's section
+    runs until the next candidate of a later item. When an item has several
+    candidates (table of contents, page headers, the real heading), the
+    longest span wins — the table-of-contents entry is a few dozen chars,
+    the real section is tens of thousands.
+    """
+    candidates = []
+    for m in _HEADING_RE.finditer(content):
+        item = m.group(1).lower()
+        if item in _ITEM_RANK:
+            candidates.append((m.start(), item))
+
+    spans: Dict[str, Tuple[int, int]] = {}
+    for i, (pos, item) in enumerate(candidates):
+        rank = _ITEM_RANK[item]
+        end = len(content)
+        for next_pos, next_item in candidates[i + 1:]:
+            if _ITEM_RANK[next_item] > rank:
+                end = next_pos
+                break
+        else:
+            # Last item in the filing (usually 16): stop at the next heading
+            # of any other item rather than running to the end of the file.
+            for next_pos, next_item in candidates[i + 1:]:
+                if next_item != item:
+                    end = next_pos
+                    break
+        best = spans.get(item)
+        if best is None or (end - pos) > (best[1] - best[0]):
+            spans[item] = (pos, end)
+    return spans
+
+
+def extract_all_sections(content: str, max_chars: Optional[int] = 50000) -> Dict[str, str]:
     """
     Universal section extractor that finds ALL sections in a 10-K
-    Works with any company's formatting
+    Works with any company's formatting.
+
+    `max_chars` caps each section (the Streamlit app's LLM prompts expect
+    bounded text); pass None for full sections, e.g. for keyword scanning.
     """
     if not content:
         return {}
     
     # Clean content for better matching
     content_clean = content.replace('—', '-').replace('–', '-').replace('−', '-')
-    
-    # Find ALL Item patterns in the document
-    # This regex will find any "Item X" followed by text
-    item_pattern = r'(?i)\b(item\s*(\d+[a-z]?\.?))\s*[-–—•·]?\s*([^\n\r]{3,100})'
-    
-    all_matches = []
-    for match in re.finditer(item_pattern, content_clean):
-        item_full = match.group(1)
-        item_num = match.group(2).strip('.')
-        item_title = match.group(3).strip()
-        
-        # Clean up the title
-        item_title = re.sub(r'[\s\-–—•·]+$', '', item_title)
-        item_title = re.sub(r'^[\s\-–—•·]+', '', item_title)
-        
-        # Skip if title is too short or looks like a continuation
-        if len(item_title) < 3 or item_title[0].islower():
-            continue
-            
-        all_matches.append({
-            'pos': match.start(),
-            'item': item_num,
-            'title': item_title,
-            'full_match': match.group(0)
-        })
-    
-    # Sort by position
-    all_matches.sort(key=lambda x: x['pos'])
-    
-    # Extract content for each section
+
+    def _cap(text: str) -> str:
+        return text if max_chars is None else text[:max_chars]
+
     sections = {}
-    
-    for i, match in enumerate(all_matches):
-        # Determine the end of this section (start of next section or end of document)
-        if i + 1 < len(all_matches):
-            end_pos = all_matches[i + 1]['pos']
-        else:
-            end_pos = len(content_clean)
-        
-        # Extract section content
-        section_content = content_clean[match['pos']:end_pos]
-        
-        # Clean up section content
-        section_content = section_content.strip()
-        
-        # Calculate metrics
-        word_count = len(section_content.split())
-        char_count = len(section_content)
-        
-        # Create section key (normalize item number)
-        section_key = f"item_{match['item'].lower().replace('.', '')}"
-        
-        # Store section
-        sections[section_key] = section_content[:50000]  # Limit to 50k chars per section
-        
-        # Also store with descriptive name for common sections
-        descriptive_name = get_descriptive_name(match['item'], match['title'])
+    for item, (start, end) in find_item_spans(content_clean).items():
+        section_content = _cap(content_clean[start:end].strip())
+        sections[f"item_{item}"] = section_content
+        descriptive_name = get_descriptive_name(item, '')
         if descriptive_name:
-            sections[descriptive_name] = section_content[:50000]
+            sections[descriptive_name] = section_content
     
     # If we didn't find standard Item patterns, try alternative approach
     if len(sections) < 5:

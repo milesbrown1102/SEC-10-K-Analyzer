@@ -1,0 +1,10 @@
+# New dependencies for the Bottleneck Monopoly Scanner backend.
+# Install alongside whatever you already have for the Streamlit app:
+#   pip install -r requirements-scanner.txt
+
+fastapi>=0.110
+uvicorn>=0.27
+yfinance>=0.2.40
+requests
+beautifulsoup4
+lxml

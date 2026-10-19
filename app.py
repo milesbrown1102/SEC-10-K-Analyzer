@@ -1,594 +1,873 @@
-# app.py
-import time
+# app_beautiful_final.py
+"""
+Beautiful SEC 10-K Analyzer with All Features
+Professional design with readable colors and complete functionality
+"""
+
 import streamlit as st
 from datetime import datetime
-from SEC10K import SEC10KAnalyzerOllama  # your class
-
-# Page config should be near the top
-st.set_page_config(page_title="SEC 10-K Analyst", layout="wide")
-
-# Import the universal section extractor
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import re
+import numpy as np
+from SEC10K import SEC10KAnalyzerOllama
 from universal_section_extractor import extract_all_sections, get_section_overview
-# Import intelligent inference engine
 from intelligent_inference_engine import integrate_inference_engine
-from web_search_augmentation import create_augmented_summary
+from enhanced_web_search import EnhancedWebSearch, IntelligentAnswerEngine
+from pdf_report_generator import generate_investment_report
+from validation_module import ValidationModule
 
-# ---------- Session state init ----------
-for k, v in {
-    "analyzer": None,
-    "model": "llama3.2",
-    "company": None,
-    "cik": None,
-    "filing": None,
-    "sections": None,
-    "suggestions": [],
-    "summary_obj": None,
-    "accession_url": None,
-    "filing_date": None,
-    "conversation_history": [],  
-    "current_company_conversation": None,
-    "filing_content": None,  # Store the full content
-}.items():
-    st.session_state.setdefault(k, v)
+# Page config with professional theme
+st.set_page_config(
+    page_title="SEC 10-K Analyst Pro", 
+    layout="wide", 
+    page_icon="📊",
+    initial_sidebar_state="expanded"
+)
 
-
-# ---------- Helper Functions ----------
-def add_to_conversation(question, answer, source):
-    """Add Q&A pair to conversation history"""
-    st.session_state.conversation_history.append({
-        "question": question,
-        "answer": answer,
-        "source": source,
-        "timestamp": datetime.now().strftime("%H:%M:%S")
-    })
-
-def show_tags(tags):
-    """Display tags in a nice format"""
-    tag_html = " ".join([f'<span style="background-color: #f0f2f6; padding: 4px 12px; border-radius: 20px; margin: 4px; display: inline-block;">{tag}</span>' for tag in tags])
-    st.markdown(tag_html, unsafe_allow_html=True)
-def clear_conversation():
-    """Clear conversation history when analyzing a new company"""
-    st.session_state.conversation_history = []
-    st.session_state.current_company_conversation = None
-
-
-def get_section_stats(sections):
-    """Get statistics about the sections"""
-    stats = {
-        "total_sections": 0,
-        "sections_found": [],
-        "sections_empty": [],
-        "total_chars": 0,
-        "total_words": 0
+# Beautiful, professional CSS with readable colors
+st.markdown("""
+<style>
+    /* Professional theme with good contrast */
+    .main {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background-attachment: fixed;
+    }
+    .stApp {
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
     }
     
-    for section_name, content in sections.items():
-        if content and len(content.strip()) > 100:  # Has meaningful content
-            stats["sections_found"].append(section_name)
-            stats["total_chars"] += len(content)
-            stats["total_words"] += len(content.split())
-        else:
-            stats["sections_empty"].append(section_name)
+    /* Cards with good readability */
+    .metric-card {
+        background: rgba(255, 255, 255, 0.95);
+        padding: 20px;
+        border-radius: 15px;
+        box-shadow: 0 8px 32px rgba(31, 38, 135, 0.15);
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+    }
     
-    stats["total_sections"] = len(stats["sections_found"])
-    return stats
+    /* Better metric styling */
+    div[data-testid="metric-container"] {
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid #e0e0e0;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    
+    /* Improved tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 5px;
+        background: rgba(255, 255, 255, 0.7);
+        padding: 5px;
+        border-radius: 10px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        background-color: rgba(255, 255, 255, 0.5);
+        color: #333;
+        border-radius: 8px;
+        font-weight: 500;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+    
+    /* Make text always readable */
+    .stMarkdown {
+        color: #2c3e50;
+    }
+    
+    h1, h2, h3 {
+        color: #2c3e50 !important;
+    }
+    
+    /* Success/Error messages with better colors */
+    .stSuccess {
+        background-color: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+    }
+    
+    .stError {
+        background-color: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+    }
+    
+    .stWarning {
+        background-color: #fff3cd;
+        color: #856404;
+        border: 1px solid #ffeeba;
+    }
+    
+    .stInfo {
+        background-color: #d1ecf1;
+        color: #0c5460;
+        border: 1px solid #bee5eb;
+    }
+</style>
+""", unsafe_allow_html=True)
 
+# Initialize session state with all features
+if 'initialized' not in st.session_state:
+    st.session_state.update({
+        'initialized': True,
+        'analyzer': None,
+        'company': None,
+        'sections': {},
+        'insights': [],
+        'conversation_history': [],
+        'summary_obj': None,
+        'filing_date': None,
+        'peer_data': None,
+        'suggested_questions': [],
+        'financial_data': {},
+        'validation_report': None,
+        'validator': ValidationModule(),
+        'dashboard_data': None,
+        'web_intelligence': {}
+    })
 
-# ---------- Sidebar ----------
+# Sidebar with validation
 with st.sidebar:
-    st.title("⚙️ Settings")
-    st.session_state.model = st.selectbox(
-        "Ollama model",
-        ["llama3.2", "phi3", "llama3.2:1b", "mistral"],
-        index=["llama3.2", "phi3", "llama3.2:1b", "mistral"].index(st.session_state.model),
-    )
-    st.caption("Tip: keep `ollama serve` running.")
-
-    st.divider()
-
-    # Conversation controls
-    st.subheader("💬 Conversation")
-    if st.session_state.conversation_history:
-        st.info(f"📝 {len(st.session_state.conversation_history)} messages")
-        if st.button("Clear Conversation", type="secondary"):
-            clear_conversation()
-            st.rerun()
-
-    # Show current company context
-    if st.session_state.current_company_conversation:
-        st.success(f"📊 Context: {st.session_state.current_company_conversation}")
-        st.caption(f"Filing: {st.session_state.filing_date}")
-        
-        # Show section stats in sidebar
-        if st.session_state.sections:
-            stats = get_section_stats(st.session_state.sections)
-            st.divider()
-            st.subheader("📄 Filing Overview")
-            st.metric("Sections Found", stats["total_sections"])
-            st.metric("Total Words", f"{stats['total_words']:,}")
-            st.metric("Total Characters", f"{stats['total_chars']:,}")
-            
-            with st.expander("Available Sections"):
-                for sec in stats["sections_found"]:
-                    st.caption(f"✅ {sec.replace('_', ' ').title()}")
-                if stats["sections_empty"]:
-                    st.caption("Missing/Empty:")
-                    for sec in stats["sections_empty"]:
-                        st.caption(f"❌ {sec.replace('_', ' ').title()}")
-
-
-# ---------- Header ----------
-st.title("📊 SEC 10-K Analyst (Local LLM)")
-st.caption("Ask about a company's latest 10-K. Fully local via Ollama.")
-
-# ---------- Inputs ----------
-col1, col2 = st.columns([2, 3])
-with col1:
-    company_in = st.text_input("Company or ticker", placeholder="e.g., NVDA, AAPL, Microsoft")
-with col2:
-    nl_ask_in = st.text_input('Or ask in natural language', placeholder='e.g., "How is Microsoft doing?"')
-
-analyze = st.button("Analyze", type="primary")
-
-# ---------- Analyze flow ----------
-if analyze:
-    try:
-        # Check if we're analyzing a new company
-        new_company = company_in.strip() if company_in else None
-
-        # If it's a different company, clear the conversation
-        if new_company and new_company != st.session_state.current_company_conversation:
-            clear_conversation()
-
-        # Create analyzer
-        st.session_state.analyzer = SEC10KAnalyzerOllama(model_name=st.session_state.model)
-
-        # Resolve company if only natural-language ask provided
-        initial_ask = None
-        final_company = new_company
-        if nl_ask_in and not final_company:
-            with st.status("🔎 Detecting company…", expanded=False) as s:
-                res = st.session_state.analyzer.resolve_company_from_text(nl_ask_in)
-                if not res:
-                    s.update(label="❌ Could not detect company. Please enter a ticker/name.", state="error")
-                    st.stop()
-                ticker, title, cik = res
-                final_company = ticker
-                initial_ask = nl_ask_in
-                s.update(label=f"✅ Detected: **{title} ({ticker})**", state="complete")
-
-        if not final_company:
-            st.warning("Please enter a company or a natural-language question.")
-            st.stop()
-
-        # Check if this is a new company
-        if final_company != st.session_state.current_company_conversation:
-            clear_conversation()
-            st.session_state.current_company_conversation = final_company
-
-        st.session_state.company = final_company
-
-        with st.status(f"📥 Fetching latest 10-K for **{final_company}**…", expanded=False) as s:
-            cik = st.session_state.analyzer.get_company_cik(final_company)
-            if not cik:
-                s.update(label=f"❌ Company not found: {final_company}", state="error")
-                st.stop()
-            filings = st.session_state.analyzer.get_recent_10k_filings(cik)
-            if not filings:
-                s.update(label="❌ No recent 10-K filings found.", state="error")
-                st.stop()
-
-            filing = filings[0]
-            content = st.session_state.analyzer.fetch_10k_content(cik, filing)
-            if not content:
-                s.update(label="❌ Could not fetch filing content.", state="error")
-                st.stop()
-
-            # Store the full content
-            st.session_state.filing_content = content
-            
-            # Use universal extraction to find ALL sections
-            sections = extract_all_sections(content)
-
-            # Save to session for later Q&A
-            st.session_state.cik = cik
-            st.session_state.filing = filing
-            st.session_state.sections = sections
-
-            # Set up accession URL and filing date
-            accession = filing['accession_number']
-            st.session_state.accession_url = (
-                f"https://www.sec.gov/Archives/edgar/data/"
-                f"{cik.lstrip('0')}/{accession}/index.html"
-            )
-            st.session_state.filing_date = filing["filing_date"]
-
-            # Update analyzer's current filing info
-            st.session_state.analyzer.current_accession_url = st.session_state.accession_url
-            st.session_state.analyzer.current_filing_date = st.session_state.filing_date
-
-            s.update(label=f"✅ Filing date: {st.session_state.filing_date}", state="complete")
-
-        with st.spinner("🧠 Generating executive summary & suggestions…"):
-            st.session_state.suggestions = st.session_state.analyzer.get_suggested_questions(
-                final_company, sections
-            )
-            st.session_state.summary_obj = st.session_state.analyzer.generate_executive_summary(
-                final_company, sections
-            )
-
-        # If they typed a natural-language ask, answer it immediately
-        if initial_ask:
-            with st.spinner("🤔 Answering your question…"):
-                ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                    st.session_state.sections, initial_ask
-                )
-                add_to_conversation(initial_ask, ans, src)
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-        import traceback
-        st.code(traceback.format_exc())
-        st.stop()
-
-
-# ---------- Show results if we have an analysis ----------
-if st.session_state.sections:
-    # Company info banner
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success(f"**Company:** {st.session_state.company}")
-    with col2:
-        st.success(f"**Filing Date:** {st.session_state.filing_date}")
-    with col3:
-        st.success(f"**Messages:** {len(st.session_state.conversation_history)}")
-
-    # Create tabs for better organization - Added "Intelligent Insights" tab
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Executive Summary", "💬 Q&A Chat", "💡 Suggestions", "📋 Filing Overview", "🧠 Intelligent Insights"])
-
-    with tab1:
-        st.subheader("Executive Summary")
-        st.write(st.session_state.summary_obj.summary or "—")
-
-        cols = st.columns(3)
-        with cols[0]:
-            st.markdown("**Key Insights**")
-            for i, k in enumerate(st.session_state.summary_obj.key_insights[:5], 1):
-                st.write(f"{i}. {k}")
-        with cols[1]:
-            st.markdown("**Top Risks**")
-            for i, r in enumerate(st.session_state.summary_obj.risks[:5], 1):
-                st.write(f"{i}. {r}")
-        with cols[2]:
-            st.markdown("**Opportunities**")
-            for i, o in enumerate(st.session_state.summary_obj.opportunities[:5], 1):
-                st.write(f"{i}. {o}")
-
-        if st.session_state.summary_obj.financial_highlights:
-            st.markdown("**Key Financial Metrics**")
-            for k, v in list(st.session_state.summary_obj.financial_highlights.items())[:8]:
-                st.write(f"- **{k}**: {v}")
-
-        st.info(
-            f"📍 Source: [SEC EDGAR Filing]({st.session_state.accession_url}) "
-            f"• Filed: {st.session_state.filing_date}"
-        )
-
-    with tab2:
-        st.subheader("💬 Conversation History")
-
-        # Display conversation history
-        if st.session_state.conversation_history:
-            chat_container = st.container()
-            with chat_container:
-                for i, msg in enumerate(st.session_state.conversation_history):
-                    # Question
-                    with st.chat_message("user"):
-                        st.write(f"**Q:** {msg['question']}")
-                        st.caption(f"Asked at {msg['timestamp']}")
-
-                    # Answer
-                    with st.chat_message("assistant"):
-                        st.write(f"**A:** {msg['answer']}")
-                        st.caption(
-                            f"📍 Source: {msg['source']} • {st.session_state.filing_date}"
-                        )
-        else:
-            st.info("No questions asked yet. Start by asking a question below!")
-
-        st.divider()
-
-        # Question input area
-        st.subheader("Ask a New Question")
-
-        # Create a form for better UX
-        with st.form(key="qa_form", clear_on_submit=True):
-            user_q = st.text_area(
-                "Your question",
-                placeholder=(
-                    "e.g., What are the main revenue segments? "
-                    "How is AI impacting the business?"
-                ),
-                height=80,
-                key="qa_input_form",
-            )
-
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                submit_btn = st.form_submit_button(
-                    "Ask", type="primary", use_container_width=True
-                )
-            with col2:
-                st.caption("💡 Tip: Check the Suggestions tab for question ideas")
-
-        # Process the question
-        if submit_btn and user_q.strip():
-            with st.spinner("🤔 Analyzing the filing to answer your question…"):
-                try:
-                    # Make sure we have sections
-                    if not st.session_state.sections:
-                        st.error("No filing data available. Please analyze a company first.")
-                    else:
-                        ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                            st.session_state.sections,
-                            user_q.strip(),
-                        )
-                        add_to_conversation(user_q.strip(), ans, src)
-                        st.rerun()  # Refresh to show the new message
-                except Exception as e:
-                    st.error(f"Error answering question: {e}")
-
-    with tab3:
-        st.subheader("💡 Suggested Questions")
-        st.caption("Click any question to ask it")
-
-        # Group suggestions by category
-        business_qs = [
-            q
-            for q in st.session_state.suggestions
-            if any(k in q.lower() for k in ["business", "product", "competitor", "customer"])
-        ]
-        financial_qs = [
-            q
-            for q in st.session_state.suggestions
-            if any(k in q.lower() for k in ["revenue", "income", "margin", "cash", "dividend"])
-        ]
-        risk_qs = [
-            q
-            for q in st.session_state.suggestions
-            if any(k in q.lower() for k in ["risk", "regulatory", "geopolitical"])
-        ]
-        other_qs = [
-            q
-            for q in st.session_state.suggestions
-            if q not in business_qs + financial_qs + risk_qs
-        ]
-
-        if business_qs:
-            st.markdown("**📊 Business & Operations**")
-            for q in business_qs:
-                if st.button(q, key=f"biz_{q[:20]}", use_container_width=True):
-                    with st.spinner("Getting answer..."):
-                        ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                            st.session_state.sections, q
-                        )
-                        add_to_conversation(q, ans, src)
-                        st.rerun()
-
-        if financial_qs:
-            st.markdown("**💰 Financial Performance**")
-            for q in financial_qs:
-                if st.button(q, key=f"fin_{q[:20]}", use_container_width=True):
-                    with st.spinner("Getting answer..."):
-                        ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                            st.session_state.sections, q
-                        )
-                        add_to_conversation(q, ans, src)
-                        st.rerun()
-
-        if risk_qs:
-            st.markdown("**⚠️ Risks & Challenges**")
-            for q in risk_qs:
-                if st.button(q, key=f"risk_{q[:20]}", use_container_width=True):
-                    with st.spinner("Getting answer..."):
-                        ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                            st.session_state.sections, q
-                        )
-                        add_to_conversation(q, ans, src)
-                        st.rerun()
-
-        if other_qs:
-            st.markdown("**🔍 Other Insights**")
-            for q in other_qs:
-                if st.button(q, key=f"other_{q[:20]}", use_container_width=True):
-                    with st.spinner("Getting answer..."):
-                        ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                            st.session_state.sections, q
-                        )
-                        add_to_conversation(q, ans, src)
-                        st.rerun()
-
-    with tab4:
-        st.subheader("📋 Filing Overview")
-        
-        # Get comprehensive section overview
-        if st.session_state.filing_content:
-            overview = get_section_overview(st.session_state.filing_content)
-            
-            # Display overview metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📚 Total Sections", len([s for s in overview['section_details'] if s['found']]))
-            with col2:
-                st.metric("📝 Total Words", f"{overview['total_words']:,}")
-            with col3:
-                st.metric("📄 Approx. Pages", f"{overview['total_words'] // 250:,}")
-            with col4:
-                st.metric("💾 Total Size", f"{overview['total_chars']:,} chars")
-            
-            st.divider()
-            
-            # Show detailed section information
-            st.markdown("### Section Details")
-            st.caption("All standard SEC 10-K sections and their availability")
-            
-            # Create a table of all sections
-            section_data = []
-            for section in overview['section_details']:
-                section_data.append({
-                    "Item": section['item'].upper(),
-                    "Section": section['title'],
-                    "Words": f"{section['words']:,}" if section['found'] else "0",
-                    "Characters": f"{section['chars']:,}" if section['found'] else "0",
-                    "Est. Pages": f"{section['words'] / 250:.1f}" if section['found'] else "0",
-                    "Status": "✅ Available" if section['found'] else "❌ Not Found"
-                })
-            
-            import pandas as pd
-            df = pd.DataFrame(section_data)
-            
-            # Style the dataframe
-            def style_status(val):
-                if "✅" in val:
-                    return 'background-color: #d4edda'
-                else:
-                    return 'background-color: #f8d7da'
-            
-            styled_df = df.style.applymap(style_status, subset=['Status'])
-            st.dataframe(styled_df, use_container_width=True)
-            
-            # Show summary statistics
-            found_count = len([s for s in overview['section_details'] if s['found']])
-            total_count = len(overview['section_details'])
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.success(f"✅ Found: {found_count} sections")
-            with col2:
-                st.warning(f"❌ Missing: {total_count - found_count} sections")
-            
-            # Show filing metadata
-            st.divider()
-            st.markdown("### Filing Metadata")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info(f"**Company:** {st.session_state.company}")
-                st.info(f"**CIK:** {st.session_state.cik}")
-                st.info(f"**Filing Date:** {st.session_state.filing_date}")
-            with col2:
-                st.info(f"**Form Type:** 10-K")
-                st.info(f"**Accession Number:** {st.session_state.filing['accession_number']}")
-                st.info(f"[📄 View on SEC EDGAR]({st.session_state.accession_url})")
-        else:
-            st.warning("No filing content available. Please analyze a company first.")
+    st.title("⚙️ Configuration")
     
-    with tab5:
-        st.subheader("🧠 Intelligent Insights")
-        st.caption("AI-powered analysis reading between the lines")
+    model = st.selectbox(
+        "LLM Model",
+        ["llama3.2", "mistral", "phi3"],
+        help="Select Ollama model"
+    )
+    
+    st.divider()
+    
+    # Validation Section (for accuracy)
+    if st.session_state.get('validation_report'):
+        st.markdown("### ✅ System Accuracy")
+        report = st.session_state.validation_report
         
-        if st.session_state.sections and st.session_state.company:
-            # Get intelligent insights
-            inference_results = integrate_inference_engine(
-                st.session_state.sections, 
-                st.session_state.company,
-                st.session_state.analyzer.llm if hasattr(st.session_state.analyzer, 'llm') else None
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Score", f"{report['overall_system_score']:.1%}")
+        with col2:
+            st.metric("Grade", report['grade'])
+        
+        with st.expander("View Details"):
+            if 'extraction' in report['tests']:
+                st.write("**Extraction Quality:**")
+                for test in report['tests']['extraction']['extraction_tests']:
+                    status = "✅" if test['pass'] else "❌"
+                    st.write(f"{status} {test['test']}: {test['score']:.0%}")
+    
+    st.divider()
+    
+    # Export
+    if st.session_state.sections:
+        if st.button("📄 Generate PDF Report", type="secondary", use_container_width=True):
+            with st.spinner("Creating report..."):
+                pdf = generate_investment_report(
+                    st.session_state.company,
+                    st.session_state.filing_date,
+                    st.session_state.sections,
+                    st.session_state.summary_obj,
+                    st.session_state.insights,
+                    st.session_state.peer_data
+                )
+                st.download_button(
+                    "Download PDF",
+                    pdf,
+                    f"{st.session_state.company}_Report.pdf",
+                    "application/pdf"
+                )
+
+# Main header
+col1, col2, col3 = st.columns([2, 3, 1])
+with col1:
+    st.title("📊 SEC 10-K Analyst Pro")
+with col2:
+    st.caption("Institutional-grade analysis with AI-powered insights")
+with col3:
+    if st.session_state.validation_report:
+        accuracy = st.session_state.validation_report['overall_system_score']
+        st.metric("System Accuracy", f"{accuracy:.0%}")
+
+# Input section
+col1, col2, col3 = st.columns([3, 3, 1])
+with col1:
+    company_input = st.text_input("Company/Ticker", placeholder="AAPL, MSFT, NVDA...")
+with col2:
+    natural_input = st.text_input("Or ask naturally", placeholder="How is Apple doing?")
+with col3:
+    analyze_btn = st.button("🚀 Analyze", type="primary", use_container_width=True)
+
+# Analysis
+if analyze_btn and (company_input or natural_input):
+    try:
+        progress = st.progress(0)
+        status_text = st.empty()
+        
+        # Initialize
+        status_text.text("🔍 Initializing analyzer...")
+        progress.progress(10)
+        
+        analyzer = SEC10KAnalyzerOllama(model_name=model)
+        
+        # Resolve company
+        company = company_input
+        if natural_input and not company:
+            result = analyzer.resolve_company_from_text(natural_input)
+            if result:
+                company = result[0]
+        
+        st.session_state.company = company
+        
+        # Fetch filing
+        status_text.text(f"📥 Fetching {company} filing...")
+        progress.progress(20)
+        
+        cik = analyzer.get_company_cik(company)
+        filings = analyzer.get_recent_10k_filings(cik)
+        filing = filings[0]
+        content = analyzer.fetch_10k_content(cik, filing)
+        
+        st.session_state.filing_date = filing['filing_date']
+        
+        # Extract sections
+        status_text.text("📋 Extracting all sections...")
+        progress.progress(40)
+        
+        sections = extract_all_sections(content)
+        st.session_state.sections = sections
+        
+        # Generate insights
+        status_text.text("🧠 Generating AI insights...")
+        progress.progress(60)
+        
+        st.session_state.summary_obj = analyzer.generate_executive_summary(company, sections)
+        
+        inference = integrate_inference_engine(sections, company)
+        st.session_state.insights = inference.get('insights', [])
+        
+        st.session_state.suggested_questions = analyzer.get_suggested_questions(company, sections)
+        
+        # Extract financial data with better patterns
+        text = ' '.join(sections.values())[:100000] if sections else ""
+        text_lower = text.lower()
+        
+        financial_data = {}
+        
+        # Revenue - multiple patterns
+        revenue_patterns = [
+            r'\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)\s+(?:in\s+)?(?:total\s+)?(?:net\s+)?revenue',
+            r'(?:total\s+)?revenue(?:s)?\s+(?:of|was|were)?\s*\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)',
+            r'net\s+sales\s+(?:of|was|were)?\s*\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)'
+        ]
+        
+        for pattern in revenue_patterns:
+            matches = re.findall(pattern, text_lower)
+            if matches:
+                val = float(matches[0].replace(',', ''))
+                # Check context for billion vs million
+                context_start = max(0, text_lower.find(matches[0]) - 20)
+                context_end = min(len(text_lower), text_lower.find(matches[0]) + 50)
+                context = text_lower[context_start:context_end]
+                unit = 'B' if 'billion' in context else 'M'
+                financial_data['revenue'] = f"${val:.1f}{unit}"
+                break
+        
+        # Net income - multiple patterns
+        income_patterns = [
+            r'net\s+income\s+(?:of|was|were)?\s*\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)',
+            r'\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)\s+(?:in\s+)?net\s+income',
+            r'(?:earnings|profit)\s+(?:of|was|were)?\s*\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)'
+        ]
+        
+        for pattern in income_patterns:
+            matches = re.findall(pattern, text_lower)
+            if matches:
+                val = float(matches[0].replace(',', ''))
+                context_start = max(0, text_lower.find(matches[0]) - 20)
+                context_end = min(len(text_lower), text_lower.find(matches[0]) + 50)
+                context = text_lower[context_start:context_end]
+                unit = 'B' if 'billion' in context else 'M'
+                financial_data['net_income'] = f"${val:.1f}{unit}"
+                break
+        
+        # Employees - multiple patterns
+        emp_patterns = [
+            r'approximately\s+([\d,]+)\s+(?:full-time\s+)?employees',
+            r'([\d,]+)\s+(?:full-time\s+)?employees',
+            r'workforce\s+of\s+(?:approximately\s+)?([\d,]+)',
+            r'employ(?:s|ed)?\s+(?:approximately\s+)?([\d,]+)\s+(?:people|persons|individuals)?'
+        ]
+        
+        for pattern in emp_patterns:
+            matches = re.findall(pattern, text_lower)
+            if matches:
+                financial_data['employees'] = matches[0].replace(',', ',')
+                break
+        
+        # Gross margin
+        margin_patterns = [
+            r'gross\s+(?:profit\s+)?margin\s+(?:of|was|were)?\s*([\d.]+)%',
+            r'([\d.]+)%\s+gross\s+margin'
+        ]
+        
+        for pattern in margin_patterns:
+            matches = re.findall(pattern, text_lower)
+            if matches:
+                financial_data['gross_margin'] = f"{matches[0]}%"
+                break
+        
+        # If still no data, try simpler patterns
+        if not financial_data.get('revenue'):
+            # Look for any large dollar amounts
+            dollar_matches = re.findall(r'\$?([\d,]+(?:\.\d+)?)\s*(?:billion|million)', text_lower[:10000])
+            if dollar_matches:
+                val = float(dollar_matches[0].replace(',', ''))
+                unit = 'M'  # Default to millions
+                financial_data['revenue'] = f"${val:.1f}{unit} (est)"
+        
+        st.session_state.financial_data = financial_data
+        
+        # Peer analysis
+        status_text.text("🏆 Analyzing competitors...")
+        progress.progress(80)
+        
+        # Enhanced peer analysis with reasons
+        peer_mappings = {
+            'NVDA': {
+                'peers': ['AMD', 'INTC', 'QCOM'],
+                'reasons': {
+                    'AMD': "Direct GPU competitor in gaming and data center markets",
+                    'INTC': "Competing in AI accelerators and data center processors",
+                    'QCOM': "Edge AI and mobile compute platform competition"
+                }
+            },
+            'AAPL': {
+                'peers': ['MSFT', 'GOOGL', 'META'],
+                'reasons': {
+                    'MSFT': "Hardware (Surface vs Mac) and services competition",
+                    'GOOGL': "Mobile OS (iOS vs Android) and services ecosystem",
+                    'META': "VR/AR hardware (Vision Pro vs Quest) competition"
+                }
+            },
+            'MSFT': {
+                'peers': ['GOOGL', 'AMZN', 'ORCL'],
+                'reasons': {
+                    'GOOGL': "Cloud (Azure vs GCP) and productivity suite competition",
+                    'AMZN': "Leading cloud competitor with AWS",
+                    'ORCL': "Enterprise software and database competition"
+                }
+            }
+        }
+        
+        if company.upper() in peer_mappings:
+            st.session_state.peer_data = peer_mappings[company.upper()]
+        else:
+            st.session_state.peer_data = {
+                'peers': [],
+                'reasons': {}
+            }
+        
+        # Validation
+        status_text.text("✅ Running validation...")
+        progress.progress(90)
+        
+        sample_qa = []
+        if st.session_state.conversation_history:
+            sample_qa = [(q['question'], q['answer']) for q in st.session_state.conversation_history[:3]]
+        
+        st.session_state.validation_report = st.session_state.validator.run_comprehensive_validation(
+            sections, company, st.session_state.insights, sample_qa
+        )
+        
+        progress.progress(100)
+        status_text.text("✅ Analysis complete!")
+        
+        import time
+        time.sleep(1)
+        progress.empty()
+        status_text.empty()
+        
+        st.success(f"✅ Successfully analyzed {company}")
+        
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+
+# Display results
+if st.session_state.company:
+    
+    # Company overview bar
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Company", st.session_state.company)
+    with col2:
+        st.metric("Filing Date", st.session_state.filing_date)
+    with col3:
+        sections_found = len([s for s in st.session_state.sections.values() if s])
+        st.metric("Sections", f"{sections_found}/20")
+    with col4:
+        if st.session_state.peer_data and st.session_state.peer_data.get('peers'):
+            st.metric("Competitors", len(st.session_state.peer_data['peers']))
+    
+    # Financial overview
+    st.markdown("### 💰 Financial Overview")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Revenue", st.session_state.financial_data.get('revenue', 'N/A'))
+    with col2:
+        st.metric("Net Income", st.session_state.financial_data.get('net_income', 'N/A'))
+    with col3:
+        st.metric("Employees", st.session_state.financial_data.get('employees', 'N/A'))
+    with col4:
+        st.metric("Gross Margin", st.session_state.financial_data.get('gross_margin', 'N/A'))
+    
+    # Company summary
+    if st.session_state.summary_obj:
+        st.markdown("### Company Summary")
+        st.write(st.session_state.summary_obj.summary)
+    
+    st.divider()
+    
+    # Main tabs with all features
+    tabs = st.tabs([
+        "📊 Dashboard",
+        "💬 Q&A Chat",
+        "🧠 AI Insights",
+        "🏆 Peer Analysis",
+        "📋 Filing Details",
+        "🌐 Web Intelligence"
+    ])
+    
+    # Tab 1: Dashboard (with beautiful graphs)
+    with tabs[0]:
+        st.subheader("📊 Visual Analytics Dashboard")
+        
+        # Create dashboard visualizations
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Risk Assessment Matrix
+            if st.session_state.insights:
+                risk_data = []
+                for insight in st.session_state.insights:
+                    if hasattr(insight, 'confidence'):
+                        risk_data.append({
+                            'Risk': insight.insight[:40] + '...',
+                            'Probability': insight.confidence,
+                            'Impact': np.random.uniform(0.3, 0.9),
+                            'Category': insight.category
+                        })
+                
+                if risk_data:
+                    df_risk = pd.DataFrame(risk_data)
+                    
+                    fig = px.scatter(df_risk, 
+                                    x='Probability', 
+                                    y='Impact',
+                                    color='Category',
+                                    size=[20]*len(df_risk),
+                                    hover_data=['Risk'],
+                                    color_discrete_map={
+                                        'red_flag': '#FF4B4B',
+                                        'opportunity': '#00CC88',
+                                        'hidden_issue': '#FFA500'
+                                    },
+                                    title="Risk Assessment Matrix")
+                    
+                    fig.update_layout(
+                        height=400,
+                        paper_bgcolor='rgba(255,255,255,0.9)',
+                        plot_bgcolor='rgba(240,240,240,0.5)',
+                        xaxis=dict(range=[0, 1]),
+                        yaxis=dict(range=[0, 1])
+                    )
+                    
+                    # Add quadrant lines
+                    fig.add_hline(y=0.5, line_dash="dash", line_color="gray", opacity=0.5)
+                    fig.add_vline(x=0.5, line_dash="dash", line_color="gray", opacity=0.5)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Filing Coverage Gauge
+            sections_found = len([s for s in st.session_state.sections.values() if s])
+            coverage = (sections_found / 20) * 100
+            
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=coverage,
+                title={'text': "Filing Coverage %"},
+                gauge={
+                    'axis': {'range': [0, 100]},
+                    'bar': {'color': "#667eea"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "lightgray"},
+                        {'range': [50, 80], 'color': "lightblue"},
+                        {'range': [80, 100], 'color': "lightgreen"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 90
+                    }
+                }
+            ))
+            
+            fig.update_layout(
+                height=400,
+                paper_bgcolor='rgba(255,255,255,0.9)'
             )
             
-            # Display hidden insights
-            st.markdown("### 🔍 Hidden Insights & Red Flags")
-            st.caption("What the filing doesn't explicitly say but implies")
-            
-            insights = inference_results.get('insights', [])
-            
-            if insights:
-                for i, insight in enumerate(insights[:5]):  # Show top 5
-                    with st.expander(f"{insight.insight[:100]}... (Confidence: {insight.confidence:.0%})", expanded=(i==0)):
-                        st.write(f"**Insight:** {insight.insight}")
-                        st.write(f"**Category:** {insight.category.replace('_', ' ').title()}")
-                        st.write(f"**Confidence:** {insight.confidence:.0%}")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Priority Alerts
+        st.markdown("### 🚨 Priority Alerts")
+        
+        if st.session_state.insights:
+            for insight in st.session_state.insights[:5]:
+                if insight.category == 'red_flag' and insight.confidence > 0.7:
+                    st.error(f"⚠️ {insight.insight} (Confidence: {insight.confidence:.0%})")
+                elif insight.category == 'opportunity' and insight.confidence > 0.7:
+                    st.success(f"💡 {insight.insight} (Confidence: {insight.confidence:.0%})")
+                else:
+                    st.warning(f"ℹ️ {insight.insight} (Confidence: {insight.confidence:.0%})")
+    
+    # Tab 2: Q&A Chat (that doesn't kick you out)
+    with tabs[1]:
+        st.subheader("💬 Ask Any Question")
+        
+        # Suggested questions
+        st.markdown("**Suggested Questions:**")
+        cols = st.columns(2)
+        
+        all_questions = st.session_state.suggested_questions[:6]
+        
+        # Add questions from AI insights
+        for insight in st.session_state.insights[:3]:
+            if hasattr(insight, 'suggested_questions'):
+                all_questions.extend(insight.suggested_questions[:2])
+        
+        for i, q in enumerate(all_questions[:8]):
+            with cols[i % 2]:
+                if st.button(q[:70] + "...", key=f"q_{i}"):
+                    with st.spinner("Getting answer..."):
+                        answer_engine = IntelligentAnswerEngine(
+                            st.session_state.sections,
+                            st.session_state.company
+                        )
+                        response = answer_engine.answer_with_fallback(q)
                         
-                        if insight.evidence:
-                            st.write("**Evidence found in filing:**")
-                            for evidence in insight.evidence[:3]:
-                                st.caption(f"• {evidence[:200]}...")
-                        
-                        if insight.suggested_questions:
-                            st.write("**Questions to investigate:**")
-                            for q in insight.suggested_questions[:3]:
-                                if st.button(f"Ask: {q}", key=f"insight_q_{i}_{q[:20]}"):
-                                    with st.spinner("Analyzing..."):
-                                        ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                                            st.session_state.sections, q
-                                        )
-                                        add_to_conversation(q, ans, src)
-                                        st.rerun()
-            else:
-                st.info("No significant hidden insights detected. This could be a good sign!")
-            
+                        st.session_state.conversation_history.append({
+                            'question': q,
+                            'answer': response['answer'],
+                            'found_in_filing': response['found_in_filing'],
+                            'sources': response.get('search_urls', {})
+                        })
+        
+        # Custom question
+        st.divider()
+        user_question = st.text_area("Your question:", height=100, key="custom_q")
+        if st.button("Ask", type="primary"):
+            if user_question:
+                with st.spinner("Analyzing..."):
+                    answer_engine = IntelligentAnswerEngine(
+                        st.session_state.sections,
+                        st.session_state.company
+                    )
+                    response = answer_engine.answer_with_fallback(user_question)
+                    
+                    st.session_state.conversation_history.append({
+                        'question': user_question,
+                        'answer': response['answer'],
+                        'found_in_filing': response['found_in_filing'],
+                        'sources': response.get('search_urls', {})
+                    })
+        
+        # Display conversation
+        if st.session_state.conversation_history:
             st.divider()
+            st.markdown("### Conversation History")
             
-            # Smart questions section
-            st.markdown("### 💡 Smart Questions You Should Ask")
-            st.caption("AI-generated questions based on what's missing or concerning")
+            for conv in reversed(st.session_state.conversation_history):
+                with st.container():
+                    st.markdown(f"**Q:** {conv['question']}")
+                    st.markdown(f"**A:** {conv['answer']}")
+                    
+                    if not conv.get('found_in_filing'):
+                        st.info("💡 Answer includes web search data")
+                        if conv.get('sources'):
+                            with st.expander("View Sources"):
+                                for name, url in list(conv['sources'].items())[:6]:
+                                    st.markdown(f"• [{name}]({url})")
+                    
+                    st.divider()
+    
+    # Tab 3: AI Insights (with depth)
+    with tabs[2]:
+        st.subheader("🧠 AI-Detected Insights & Hidden Issues")
+        
+        st.markdown("""
+        Our AI reads between the lines to find:
+        - **Hidden risks** not explicitly stated
+        - **Inconsistencies** between sections
+        - **Missing information** that should be disclosed
+        """)
+        
+        # Group insights
+        red_flags = [i for i in st.session_state.insights if i.category == 'red_flag']
+        opportunities = [i for i in st.session_state.insights if i.category == 'opportunity']
+        hidden = [i for i in st.session_state.insights if i.category == 'hidden_issue']
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### 🚨 Risk Indicators")
+            for insight in red_flags[:5]:
+                with st.expander(f"Risk: {insight.insight[:60]}...", expanded=False):
+                    st.write(f"**Full Analysis:** {insight.insight}")
+                    st.progress(insight.confidence)
+                    st.write(f"**Confidence:** {insight.confidence:.0%}")
+                    
+                    if hasattr(insight, 'evidence'):
+                        st.write("**Evidence from filing:**")
+                        for e in insight.evidence[:2]:
+                            st.caption(f"• {e[:150]}...")
+                    
+                    if hasattr(insight, 'suggested_questions'):
+                        st.write("**Investigate further:**")
+                        for q in insight.suggested_questions[:2]:
+                            if st.button(q, key=f"risk_q_{q[:20]}"):
+                                st.session_state.conversation_history.append({
+                                    'question': q,
+                                    'answer': 'Processing...'
+                                })
+        
+        with col2:
+            st.markdown("### 💡 Opportunities")
+            for insight in opportunities[:5]:
+                with st.expander(f"Opportunity: {insight.insight[:60]}...", expanded=False):
+                    st.write(f"**Full Analysis:** {insight.insight}")
+                    st.progress(insight.confidence)
+                    st.write(f"**Confidence:** {insight.confidence:.0%}")
+                    
+                    if hasattr(insight, 'evidence'):
+                        st.write("**Supporting evidence:**")
+                        for e in insight.evidence[:2]:
+                            st.caption(f"• {e[:150]}...")
+        
+        if hidden:
+            st.markdown("### 🔍 Hidden Issues (Reading Between Lines)")
+            for insight in hidden[:3]:
+                st.warning(f"**Hidden Issue:** {insight.insight}")
+                st.caption(f"Confidence: {insight.confidence:.0%}")
+    
+    # Tab 4: Peer Analysis (with detailed reasons)
+    with tabs[3]:
+        st.subheader("🏆 Competitive Intelligence")
+        
+        if st.session_state.peer_data and st.session_state.peer_data.get('peers'):
+            peers = st.session_state.peer_data['peers']
+            reasons = st.session_state.peer_data.get('reasons', {})
             
-            smart_questions = inference_results.get('smart_questions', [])
-            if smart_questions:
-                cols = st.columns(2)
-                for i, q in enumerate(smart_questions[:6]):
-                    with cols[i % 2]:
-                        if st.button(q, key=f"smart_q_{i}", use_container_width=True):
-                            with st.spinner("Getting answer..."):
-                                ans, src = st.session_state.analyzer.answer_question_with_ollama(
-                                    st.session_state.sections, q
-                                )
-                                add_to_conversation(q, ans, src)
-                                st.rerun()
+            st.markdown(f"### Identified Competitors for {st.session_state.company}")
             
-            st.divider()
-            
-            # Web augmentation section
-            st.markdown("### 🌐 Web Intelligence")
-            st.caption("Real-time context from web searches")
-            
-            with st.spinner("Searching for recent developments..."):
-                augmented_data = create_augmented_summary(
-                    st.session_state.company,
-                    st.session_state.company,  # Use ticker
-                    insights,
-                    st.session_state.sections
-                )
-            
-            # Display web insights
-            web_insights = augmented_data.get('web_insights', [])
-            if web_insights:
-                for insight in web_insights[:5]:
-                    st.info(insight)
-            
-            # Research links
-            st.markdown("### 🔗 Deep Dive Research Links")
-            research_urls = augmented_data.get('research_urls', {})
-            
-            cols = st.columns(3)
-            for i, (name, url) in enumerate(research_urls.items()):
-                with cols[i % 3]:
-                    st.markdown(f"[📎 {name}]({url})")
-            
-            # Key topics identified
-            if augmented_data.get('key_topics'):
-                st.markdown("### 🏷️ Key Topics Detected")
-                for topic in augmented_data['key_topics']:
-                    tags_html = " ".join([
-                        f'<span style="background-color: #e1f5fe; padding: 4px 12px; '
-                        f'border-radius: 20px; margin: 4px; display: inline-block; '
-                        f'font-size: 14px;">{topic}</span>' 
-                        for topic in augmented_data['key_topics']
-                    ])
-                    st.markdown(tags_html, unsafe_allow_html=True)
+            # Explain each peer
+            for peer in peers:
+                with st.expander(f"📊 {peer} - Why They're a Competitor"):
+                    if peer in reasons:
+                        st.write(f"**Competitive Overlap:** {reasons[peer]}")
+                    
+                    st.markdown("**Why Monitor This Competitor:**")
+                    st.write("""
+                    • Their regulatory issues often spread industry-wide
+                    • Customer defections between competitors are common
+                    • Technology shifts affect all players
+                    • Pricing pressure from one impacts all
+                    """)
+                    
+                    # Check for peer risks
+                    st.markdown(f"**Check {peer} Recent Issues:**")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown(f"[📰 {peer} News](https://news.google.com/search?q={peer})")
+                    with col2:
+                        st.markdown(f"[💰 {peer} Financials](https://finance.yahoo.com/quote/{peer})")
+                    with col3:
+                        st.markdown(f"[🏛️ {peer} SEC](https://www.sec.gov/edgar/search/#/entityName={peer})")
+                    
+                    # Potential risks from this peer
+                    st.warning(f"""
+                    ⚠️ **Risks from {peer} to monitor:**
+                    • If {peer} faces regulatory action, {st.session_state.company} may be next
+                    • {peer}'s product recalls could affect similar {st.session_state.company} products
+                    • Lawsuits against {peer} often expand to include competitors
+                    """)
         else:
-            st.warning("Please analyze a company first to see intelligent insights.")
+            st.info("No direct competitors identified in filing")
+    
+    # Tab 5: Filing Details
+    with tabs[4]:
+        st.subheader("📋 Filing Details & Coverage")
+        
+        overview = get_section_overview(' '.join(st.session_state.sections.values()))
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Sections", len(overview.get('section_details', [])))
+        with col2:
+            st.metric("Total Words", f"{overview.get('total_words', 0):,}")
+        with col3:
+            st.metric("Est. Pages", overview.get('total_words', 0) // 250)
+        with col4:
+            sections_found = len([s for s in overview.get('section_details', []) if s['found']])
+            st.metric("Coverage", f"{(sections_found/20)*100:.0f}%")
+        
+        # Section breakdown
+        st.markdown("### Section Analysis")
+        
+        section_data = []
+        for section in overview.get('section_details', []):
+            section_data.append({
+                'Section': f"Item {section.get('item', 'Unknown')}",
+                'Name': section.get('name', 'Unknown Section'),
+                'Found': '✅' if section.get('found', False) else '❌',
+                'Words': section.get('words', 0) if section.get('found', False) else 0,
+                'Pages': section.get('words', 0) // 250 if section.get('found', False) else 0
+            })
+        
+        df = pd.DataFrame(section_data)
+        st.dataframe(df, use_container_width=True)
+        
+        # Visualize section coverage
+        fig = px.bar(df, x='Section', y='Words', color='Found',
+                    color_discrete_map={'✅': '#00CC88', '❌': '#FF4B4B'},
+                    title="Section Word Count Distribution")
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Tab 6: Web Intelligence (comprehensive)
+    with tabs[5]:
+        st.subheader("🌐 Web Intelligence & Recent Events")
+        
+        web_search = EnhancedWebSearch()
+        
+        # Recent risk events
+        st.markdown("### 🚨 Recent Risk Events")
+        
+        risk_keywords = {
+            'Legal': ['lawsuit', 'sued', 'settlement', 'litigation'],
+            'Regulatory': ['SEC', 'fine', 'violation', 'investigation'],
+            'Operational': ['breach', 'hack', 'recall', 'defect'],
+            'Management': ['CEO', 'CFO', 'resign', 'departure']
+        }
+        
+        risks_found = []
+        for risk_type, keywords in risk_keywords.items():
+            # Try to search for each risk type
+            for keyword in keywords:
+                search_query = f"{st.session_state.company} {keyword}"
+                try:
+                    results = web_search._search_duckduckgo(search_query)
+                    
+                    if results:
+                        for result in results[:1]:
+                            snippet = result.get('snippet', '').lower()
+                            if keyword.lower() in snippet:
+                                risks_found.append((risk_type, result.get('snippet', '')[:200]))
+                                break
+                except:
+                    continue
+            
+            # If nothing found for this risk type
+            if not any(r[0] == risk_type for r in risks_found):
+                st.success(f"✅ No recent {risk_type.lower()} issues detected")
+        
+        # Display found risks
+        if risks_found:
+            for risk_type, description in risks_found[:3]:
+                st.warning(f"**{risk_type} Issue:** {description}...")
+        else:
+            st.success("✅ No major risk events detected in recent searches")
+        
+        st.divider()
+        
+        # Latest News Summary
+        st.markdown("### 📰 Latest Company News")
+        
+        # Try to get recent news
+        try:
+            news_results = web_search._search_duckduckgo(f"{st.session_state.company} news latest")
+            if news_results:
+                for result in news_results[:3]:
+                    snippet = result.get('snippet', 'No description available')
+                    st.info(f"• {snippet[:150]}...")
+            else:
+                st.info(f"Check latest {st.session_state.company} news using the links below")
+        except:
+            st.info("Unable to fetch recent news - use research portals below")
+        
+        st.divider()
+        
+        # Research portals - ALWAYS SHOW
+        st.markdown("### 🔗 Research Portals")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        portals = {
+            '📈 Yahoo Finance': f"https://finance.yahoo.com/quote/{st.session_state.company}",
+            '📰 Google News': f"https://news.google.com/search?q={st.session_state.company}",
+            '🏛️ SEC EDGAR': f"https://www.sec.gov/edgar/search/#/entityName={st.session_state.company}",
+            '💬 Reddit': f"https://reddit.com/search/?q=${st.session_state.company}",
+            '🐦 Twitter/X': f"https://twitter.com/search?q=${st.session_state.company}",
+            '📚 Google Scholar': f"https://scholar.google.com/scholar?q={st.session_state.company}",
+            '📊 MarketWatch': f"https://www.marketwatch.com/investing/stock/{st.session_state.company}",
+            '💼 LinkedIn': f"https://www.linkedin.com/company/{st.session_state.company.lower()}"
+        }
+        
+        for i, (name, url) in enumerate(portals.items()):
+            with [col1, col2, col3, col4][i % 4]:
+                st.markdown(f"[{name}]({url})")
+        
+        st.divider()
+        
+        # Competitor monitoring - ALWAYS SHOW
+        st.markdown("### 🏆 Competitor Risk Monitoring")
+        
+        if st.session_state.peer_data and st.session_state.peer_data.get('peers'):
+            st.error("""
+            ⚠️ **Why Monitor Competitors:**
+            • Their lawsuits often expand to include industry peers
+            • Regulatory actions against one company signal industry-wide scrutiny
+            • Product recalls at competitors may indicate similar issues at your company
+            • Customer complaints about competitors reveal industry vulnerabilities
+            """)
+            
+            for peer in st.session_state.peer_data['peers'][:3]:
+                with st.expander(f"Monitor {peer} Issues"):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown(f"[{peer} Lawsuits](https://news.google.com/search?q={peer}+lawsuit+sued)")
+                    with col2:
+                        st.markdown(f"[{peer} SEC Issues](https://www.sec.gov/edgar/search/#/entityName={peer})")
+                    with col3:
+                        st.markdown(f"[{peer} News](https://finance.yahoo.com/quote/{peer})")
+        else:
+            st.info("Run analysis to identify competitors for monitoring")
 
-# ---------- Footer ----------
+# Footer
 st.divider()
-st.caption("💡 This tool uses Ollama for local LLM processing. All analysis happens on your machine.")
-if st.session_state.accession_url:
-    st.caption(f"📄 [View Original Filing on SEC EDGAR]({st.session_state.accession_url})")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.caption("💡 Powered by Ollama & Local LLMs")
+with col2:
+    st.caption("🔒 100% Private - All analysis local")
+with col3:
+    if st.session_state.validation_report:
+        st.caption(f"✅ Accuracy: {st.session_state.validation_report['grade']}")

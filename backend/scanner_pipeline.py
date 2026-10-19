@@ -1,0 +1,170 @@
+# backend/scanner_pipeline.py
+"""
+Orchestrates the full 3-tier Bottleneck Monopoly Scanner and persists
+everything to backend.db so results survive a restart and don't require
+re-running the pipeline just to look at them again.
+"""
+
+import json
+from typing import Dict, List, Optional
+
+from . import (
+    capex_pipeline, bottleneck_detector, supplier_matcher, market_screener,
+    deal_monitor, scoring, db, sec_utils,
+)
+
+DEFAULT_WATCHLIST = ["MSFT", "META", "GOOGL", "AMZN", "AAPL"]
+
+
+def run_full_scan(watchlist: Optional[List[str]] = None, include_news_leads: bool = True) -> int:
+    """
+    Runs Tier 1 (CapEx) -> Tier 2 (bottleneck keywords) -> Tier 3 (supplier
+    matching, now with an open-industry-discovery fallback + a revenue-based
+    market-control ranking) -> market screener -> deal monitor (SEC 8-Ks,
+    plus optional best-effort news leads) -> transparent buy scores, in that
+    order, against the given watchlist (defaults to the playbook's own
+    mega-cap set). Returns the run_id; raises on failure after marking the
+    run 'failed' in the db so the caller/UI can see why.
+    """
+    watchlist = [t.strip().upper() for t in (watchlist or DEFAULT_WATCHLIST) if t.strip()]
+    run_id = db.create_scan_run(watchlist)
+
+    try:
+        session = sec_utils.make_sec_session()
+
+        capex_results = capex_pipeline.run_capex_tier(watchlist, session, run_id)
+
+        signals = bottleneck_detector.run_bottleneck_tier(watchlist, session, run_id)
+        signals = supplier_matcher.run_supplier_tier(signals, run_id, session=session)
+
+        supplier_matcher.run_spinoff_monitor(session, run_id)
+
+        supplier_tickers = sorted({
+            match["supplier_ticker"]
+            for sig in signals
+            for match in sig.get("suppliers", [])
+        })
+        if supplier_tickers:
+            market_screener.screen_many(supplier_tickers)
+
+            # Deal monitor runs against the mega-cap watchlist (e.g. did
+            # Meta itself disclose the SanDisk deal) AND the discovered
+            # suppliers (did SanDisk disclose it too) — a deal usually
+            # shows up in both companies' filings.
+            deal_pool = sorted(set(watchlist) | set(supplier_tickers))
+            deal_monitor.run_deal_monitor(
+                deal_pool, session, run_id, include_news=include_news_leads
+            )
+
+            _compute_and_store_buy_scores(signals, capex_results, watchlist, run_id)
+
+        db.finish_scan_run(run_id, "completed")
+
+    except Exception as e:
+        db.finish_scan_run(run_id, "failed", error=f"{type(e).__name__}: {e}")
+        raise
+
+    return run_id
+
+
+def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
+                                   watchlist: List[str], run_id: int) -> None:
+    """
+    One buy score per UNIQUE supplier ticker, persisted as a cache entry
+    keyed by run_id so get_scan_results can read it back without
+    recomputing. Kept in the kv_cache table rather than a new schema
+    table since this is derived/summary data, not a primary record.
+
+    A supplier can be matched from more than one signal (e.g. flagged for
+    both MSFT's and META's filings) — rather than emit one duplicate-ish
+    score row per signal, this aggregates across every signal a ticker
+    was matched from and scores it on its single BEST-supported context:
+    the highest-confidence signal, and "thesis intact" true if any
+    contributing mega-cap cleared the CapEx threshold. The mega-cap
+    tickers and industry labels behind the score are kept as a list so
+    the UI can still show everything that contributed.
+    """
+    by_ticker: Dict[str, Dict] = {}
+    for sig in signals:
+        mega_cap = sig["mega_cap_ticker"]
+        thesis_intact = bool(capex_results.get(mega_cap, {}).get("flagged_high_growth"))
+
+        for supplier in sig.get("suppliers", []):
+            ticker = supplier["supplier_ticker"]
+            entry = by_ticker.setdefault(ticker, {
+                "best_confidence": 0.0, "thesis_intact": False,
+                "mega_caps": set(), "industries": set(), "market_control_rank": None,
+            })
+            entry["best_confidence"] = max(entry["best_confidence"], sig["confidence"])
+            entry["thesis_intact"] = entry["thesis_intact"] or thesis_intact
+            entry["mega_caps"].add(mega_cap)
+            if supplier.get("industry_label"):
+                entry["industries"].add(supplier["industry_label"])
+            if supplier.get("market_control_rank") and entry["market_control_rank"] is None:
+                entry["market_control_rank"] = supplier["market_control_rank"]
+
+    deal_events = db.get_deal_events(tickers=list(by_ticker.keys())) if by_ticker else []
+    deal_tickers_confirmed = {e["ticker"] for e in deal_events if e["source"] == "sec_8k"}
+
+    scores = []
+    for ticker, ctx in by_ticker.items():
+        market_data = db.cache_get("market_screen", ticker, ttl_seconds=None)
+        confirmed_deal = ticker in deal_tickers_confirmed
+
+        score = scoring.compute_buy_score(
+            ticker=ticker,
+            thesis_intact=ctx["thesis_intact"],
+            signal_confidence=ctx["best_confidence"],
+            market_data=market_data,
+            confirmed_deal=confirmed_deal,
+            market_control_rank=ctx["market_control_rank"],
+        )
+        score["caution_flags"] = scoring.compute_caution_flags(
+            signal_confidence=ctx["best_confidence"],
+            market_data=market_data,
+            confirmed_deal=confirmed_deal,
+        )
+        score["mega_cap_ticker"] = ", ".join(sorted(ctx["mega_caps"]))
+        score["industry_label"] = ", ".join(sorted(ctx["industries"])) or None
+        scores.append(score)
+
+    db.cache_set(f"buy_scores_{run_id}", "all", scores)
+
+
+def get_scan_results(run_id: int) -> Dict:
+    """Assembles everything the UI needs to render one completed (or in-progress) run."""
+    run = db.get_scan_run(run_id)
+    if not run:
+        return {}
+
+    watchlist = json.loads(run["watchlist"])
+    signals = db.get_signals_for_run(run_id)
+
+    capex = db.get_all_capex_history(watchlist)
+
+    supplier_tickers = sorted({
+        match["supplier_ticker"]
+        for sig in signals
+        for match in sig.get("suppliers", [])
+    })
+    market_data = {
+        t: db.cache_get("market_screen", t, ttl_seconds=None) for t in supplier_tickers
+    }
+
+    spinoffs = db.get_recent_spinoff_filings()
+
+    deal_pool = sorted(set(watchlist) | set(supplier_tickers))
+    deals = db.get_deal_events(tickers=deal_pool) if deal_pool else []
+
+    buy_scores = db.cache_get(f"buy_scores_{run_id}", "all", ttl_seconds=None) or []
+
+    return {
+        "run": run,
+        "watchlist": watchlist,
+        "capex": capex,
+        "signals": signals,
+        "market_data": market_data,
+        "spinoffs": spinoffs,
+        "deals": deals,
+        "buy_scores": buy_scores,
+    }

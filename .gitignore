@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local data / caches (rebuilt automatically from SEC, yfinance, OpenFIGI)
+*.db
+*.db-journal
+
+# Node (localtunnel helper)
+node_modules/
+
+# Windows download metadata
+*:Zone.Identifier
+
+# Streamlit secrets
+.streamlit/secrets.toml
