@@ -17,7 +17,9 @@ background task and returns immediately; poll /scanner/status or
 /scanner/results/{run_id} for progress and results.
 """
 
+import os
 import threading
+import time
 from typing import List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -25,8 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import (
-    backtest, bottleneck_detector, db, historical_pipeline, industry_radar,
-    institutional_holdings, point_in_time, scanner_pipeline, scoring, sec_utils,
+    aftermath, backtest, bottleneck_detector, db, historical_pipeline, industry_radar, insider_trading,
+    institutional_holdings, point_in_time, radar_backtest, scanner_pipeline, scoring, sec_utils,
 )
 
 app = FastAPI(title="SEC 10-K Analyzer — Bottleneck Scanner API", version="0.1.0")
@@ -136,6 +138,15 @@ def run_historical(req: HistoricalRequest):
     result = historical_pipeline.run_historical_trend(
         req.ticker, session, max_years=req.max_years
     )
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/historical/{ticker}/aftermath")
+def historical_aftermath(ticker: str, filing_date: str):
+    """What happened in the 12 months after one of this company's 10-Ks."""
+    result = aftermath.filing_aftermath(ticker, filing_date)
     if result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
     return result
@@ -347,7 +358,13 @@ def radar_company(ticker: str):
                               if not f.startswith("Low-confidence bottleneck signal")]
     report = institutional_holdings.get_latest_report()
     holders = institutional_holdings.holdings_for_tickers(report, [ticker])[ticker] if report else []
+    try:
+        insider_trading.refresh_recent([ticker], session)
+    except Exception:
+        pass
+    insider = insider_trading.insider_activity(cik, today)
     return {"ticker": ticker, "cik": cik, "tightness": tightness, "valuation": valuation,
+            "insider": insider,
             "technicals": tech, "quarterly_revenue_growth_pct": rev, "score": score,
             "fund_holders": holders,
             "in_universe": ticker in scanner_pipeline.supplier_universe()}
@@ -376,3 +393,210 @@ def add_universe(item: UniverseItem):
 @app.delete("/universe/{ticker}")
 def remove_universe(ticker: str):
     return {"custom": industry_radar.remove_from_universe(ticker)}
+
+
+# =============================================================================
+# Insider buying (Form 4) — quarterly SEC data sets + recent filings.
+# =============================================================================
+
+_ins_lock = threading.Lock()
+_ins_state = {"in_progress": False, "error": None, "done": 0, "total": 0}
+
+
+def _run_insiders_background():
+    def progress(done, total, q):
+        _ins_state.update(done=done, total=total)
+    try:
+        insider_trading.load_data_sets(progress=progress)
+        insider_trading.refresh_recent(scanner_pipeline.supplier_universe())
+        _ins_state["error"] = None
+    except Exception as e:
+        _ins_state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with _ins_lock:
+            _ins_state["in_progress"] = False
+
+
+@app.post("/insiders/refresh")
+def refresh_insiders(background_tasks: BackgroundTasks):
+    with _ins_lock:
+        if _ins_state["in_progress"]:
+            raise HTTPException(status_code=409, detail="An insider refresh is already running.")
+        _ins_state.update(in_progress=True, error=None, done=0, total=0)
+    background_tasks.add_task(_run_insiders_background)
+    return {"status": "started"}
+
+
+@app.get("/insiders/status")
+def insiders_status():
+    loaded = insider_trading.loaded_quarters()
+    return {**_ins_state, "quarters_loaded": len(loaded),
+            "covers_through": insider_trading.bulk_covers_through(),
+            "purchases": sum(q["purchases"] for q in loaded.values())}
+
+
+@app.get("/insiders/clusters")
+def insider_clusters(days: int = 90, min_buyers: int = 2, min_total_value: float = 100_000):
+    return {"days": days, "covers_through": insider_trading.bulk_covers_through(),
+            "clusters": insider_trading.cluster_buys(days, min_buyers, min_total_value=min_total_value)}
+
+
+@app.get("/insiders/{ticker}")
+def insider_ticker(ticker: str, days: int = 365):
+    session = sec_utils.make_sec_session()
+    cik = sec_utils.get_cik_for_ticker(ticker, session)
+    if not cik:
+        raise HTTPException(status_code=404, detail=f"No SEC filer found for '{ticker}'")
+    try:
+        insider_trading.refresh_recent([ticker], session)
+    except Exception:
+        pass
+    return insider_trading.insider_activity(cik, point_in_time.today(), days)
+
+
+# =============================================================================
+# Radar backtest — does newly appearing tightness language precede
+# outperformance? Background task: first run searches ~45 quarters of
+# filings and downloads monthly prices for ~1-2k tickers.
+# =============================================================================
+
+_rbt_lock = threading.Lock()
+_rbt_state = {"in_progress": False, "error": None, "done": 0, "total": 0, "stage": None}
+
+
+def _run_radar_backtest_background():
+    def progress(done, total, current, stage):
+        _rbt_state.update(done=done, total=total, stage=stage)
+    try:
+        radar_backtest.run_radar_backtest(progress=progress)
+        _rbt_state["error"] = None
+    except Exception as e:
+        _rbt_state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with _rbt_lock:
+            _rbt_state["in_progress"] = False
+
+
+@app.post("/radar-backtest/run")
+def start_radar_backtest(background_tasks: BackgroundTasks):
+    with _rbt_lock:
+        if _rbt_state["in_progress"]:
+            raise HTTPException(status_code=409, detail="A radar backtest is already running.")
+        _rbt_state.update(in_progress=True, error=None, done=0, total=0, stage=None)
+    background_tasks.add_task(_run_radar_backtest_background)
+    return {"status": "started"}
+
+
+@app.get("/radar-backtest/status")
+def radar_backtest_status():
+    report = radar_backtest.get_latest_report()
+    return {**_rbt_state, "generated_at": report["generated_at"] if report else None}
+
+
+@app.get("/radar-backtest/latest")
+def latest_radar_backtest():
+    report = radar_backtest.get_latest_report()
+    if not report:
+        raise HTTPException(status_code=404, detail="No radar backtest yet")
+    return report
+
+
+# =============================================================================
+# Weekly auto-refresh. Runs inside the backend (a WSL cron job would only
+# fire while WSL happens to be open): every 30 minutes, anything older than
+# REFRESH_AFTER_DAYS is refreshed, one job at a time, in the background.
+# The live track record depends on scans happening regularly.
+# Disable with SEC_ANALYZER_SCHEDULER=off.
+# =============================================================================
+
+
+REFRESH_AFTER_DAYS = 7
+SCHEDULER_INTERVAL_SECONDS = 30 * 60
+_schedule_state = {"enabled": os.environ.get("SEC_ANALYZER_SCHEDULER", "on") != "off",
+                   "last_check": None, "last_started": {}}
+
+
+def _age_days(ts: Optional[float]) -> float:
+    return float("inf") if not ts else (time.time() - ts) / 86400
+
+
+def _latest_completed_scan_ts() -> Optional[float]:
+    for run in db.list_scan_runs(20):
+        if run["status"] == "completed":
+            return run["finished_at"]
+    return None
+
+
+def _scheduled_jobs():
+    """(name, last_refreshed_ts, start_fn) — start_fn returns False if busy."""
+    def start_scan():
+        global _scan_in_progress
+        with _scan_lock:
+            if _scan_in_progress:
+                return False
+            _scan_in_progress = True
+        threading.Thread(target=_run_scan_background, args=(None,), daemon=True).start()
+        return True
+
+    def start_13f():
+        global _inst_in_progress
+        with _inst_lock:
+            if _inst_in_progress:
+                return False
+            _inst_in_progress = True
+        threading.Thread(target=_run_institutions_background, args=(None,), daemon=True).start()
+        return True
+
+    def start_radar():
+        with _radar_lock:
+            if _radar_state["in_progress"]:
+                return False
+            _radar_state.update(in_progress=True, error=None)
+        threading.Thread(target=_run_radar_background, daemon=True).start()
+        return True
+
+    def start_insiders():
+        with _ins_lock:
+            if _ins_state["in_progress"]:
+                return False
+            _ins_state.update(in_progress=True, error=None)
+        threading.Thread(target=_run_insiders_background, daemon=True).start()
+        return True
+
+    inst = institutional_holdings.get_latest_report()
+    radar = industry_radar.get_latest_report()
+    loaded = insider_trading.loaded_quarters()
+    return [
+        ("scan", _latest_completed_scan_ts(), start_scan),
+        ("13f", inst["generated_at"] if inst else None, start_13f),
+        ("radar", radar["generated_at"] if radar else None, start_radar),
+        ("insiders", max((q["loaded_at"] for q in loaded.values()), default=None), start_insiders),
+    ]
+
+
+def _scheduler_loop():
+    while True:
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
+        _schedule_state["last_check"] = time.time()
+        try:
+            for name, ts, start in _scheduled_jobs():
+                if _age_days(ts) >= REFRESH_AFTER_DAYS and start():
+                    _schedule_state["last_started"][name] = time.time()
+                    break  # one job per check, so SEC isn't hit by three at once
+        except Exception:
+            pass  # never let the scheduler thread die
+
+
+if _schedule_state["enabled"]:
+    threading.Thread(target=_scheduler_loop, daemon=True, name="auto-refresh").start()
+
+
+@app.get("/schedule")
+def schedule_status():
+    return {
+        **_schedule_state,
+        "refresh_after_days": REFRESH_AFTER_DAYS,
+        "jobs": [{"name": n, "last_refreshed": ts, "age_days": round(_age_days(ts), 2)
+                  if ts else None, "due": _age_days(ts) >= REFRESH_AFTER_DAYS}
+                 for n, ts, _ in _scheduled_jobs()],
+    }

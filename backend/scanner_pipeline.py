@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from . import (
     capex_pipeline, bottleneck_detector, supplier_matcher, market_screener,
-    deal_monitor, scoring, db, sec_utils, point_in_time,
+    deal_monitor, scoring, db, sec_utils, point_in_time, insider_trading,
 )
 
 DEFAULT_WATCHLIST = ["MSFT", "META", "GOOGL", "AMZN", "AAPL"]
@@ -140,6 +140,10 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
     # Same point-in-time code the backtest validates, with as_of = today.
     session = sec_utils.make_sec_session()
     today = point_in_time.today()
+    try:  # Form 4s filed since the newest quarterly insider data set
+        insider_trading.refresh_recent(list(by_ticker), session)
+    except Exception:
+        pass
 
     scores = []
     for ticker, ctx in by_ticker.items():
@@ -153,6 +157,8 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
             tightness = bottleneck_detector.supplier_tightness(ticker, today, session)
         except Exception:
             tightness = None
+        cik = sec_utils.get_cik_for_ticker(ticker, session)
+        insider = insider_trading.insider_activity(cik, today) if cik else None
 
         score = scoring.compute_buy_score(
             ticker=ticker,
@@ -163,6 +169,7 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
             market_control_rank=ctx["market_control_rank"],
             valuation=valuation,
             own_tightness=tightness,
+            insider=insider,
         )
         score["caution_flags"] = scoring.compute_caution_flags(
             signal_confidence=ctx["best_confidence"],
@@ -172,6 +179,7 @@ def _compute_and_store_buy_scores(signals: List[Dict], capex_results: Dict,
         )
         score["valuation"] = valuation
         score["own_tightness"] = tightness
+        score["insider"] = {k: v for k, v in insider.items() if k != "rows"} if insider else None
         # Recorded for the live track record (Score Validation page).
         score["scan_date"] = today
         score["price_at_scan"] = point_in_time.price_on(ticker, today)

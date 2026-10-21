@@ -1,5 +1,43 @@
 # SEC 10-K Analyzer — Changes
 
+## Pass 7: what happened next, insider buying, radar backtest, auto-refresh
+
+- **One-command start (`./start.sh`, `./start.sh stop`)** — starts the
+  backend and the app if they aren't running and opens the browser.
+- **Historical Trend Lookup: "What happened next?"** per 10-K
+  (`backend/aftermath.py`) — over the following 12 months: the stock's
+  3/6/12-month return vs the S&P 500; companies it invested in or signed
+  with, found through *their* 8-Ks (Items 1.01 / 2.01 / 3.02), since a
+  deal immaterial to a giant must be disclosed by the smaller party —
+  with each counterparty's industry and its own stock return; new stakes
+  from its 13F where it files one; its own commercial / M&A 8-Ks; and
+  in-house fixes and secured supply it disclosed, plus the CapEx change.
+  Product mentions ("2,000 NVIDIA GPUs") are filtered out. Example —
+  NVIDIA after its Feb 2025 10-K: invested in Intel (+153-255% after),
+  Synopsys (+4%), CoreWeave (-33-37%), Nokia (13F only); Alphabet after
+  its Feb 2025 10-K backstopped Cipher Mining and TeraWulf data centers
+  for power. Deal-to-bottleneck links are inferred, not stated.
+- **Insider buying (`backend/insider_trading.py`)** — open-market
+  purchases by officers and directors from SEC's quarterly Form 345 data
+  sets (292k purchases since 2017) plus recent Form 4s read directly.
+  Shown in the buy score (info only), the radar drill-down, and a
+  market-wide cluster-buying tab on the Smart Money page. Backtested in
+  the score universe: no signal (IC -0.02; clusters -0.12, only 17 cases),
+  so it earns no points.
+- **Radar backtest (`backend/radar_backtest.py`)** — 5,944 company-quarters
+  since 2016. Companies using seller-side tightness phrases beat small
+  caps on *average* (+8.4%/12m, t 4.8) but the *median* company lagged
+  (-2.9%; 47% beat) — a few big winners, plus survivorship (13% lack
+  prices). "Newly saying it" wasn't significantly better than "already
+  saying it". New + insider buying: +42.9% average, +4.0% median, 134
+  cases — suggestive, not proven.
+- **Weekly auto-refresh** inside the backend: scan, 13F, radar and insider
+  data refresh when older than 7 days (`GET /schedule`; disable with
+  `SEC_ANALYZER_SCHEDULER=off`), so the live track record keeps growing.
+
+Tests: `test_aftermath.py`, `test_radar_backtest_and_insiders.py` new;
+47 tests pass.
+
 ## Pass 6: widen — Industry Radar across every SEC filer
 
 The backtest pointed here: the promising signal is a company's own filing

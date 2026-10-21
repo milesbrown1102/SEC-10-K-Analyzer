@@ -184,6 +184,72 @@ else:
         st.dataframe(rows, width="stretch", hide_index=True)
 
 # -----------------------------------------------------------------------------
+# Industry Radar backtest
+# -----------------------------------------------------------------------------
+
+st.header("Industry Radar backtest")
+st.caption("Does a company that newly starts saying its product is scarce (\"demand exceeds supply\", "
+           "\"pricing power\", …) go on to beat the market? Every SEC filer, each quarter since 2016.")
+rstatus = _get("/radar-backtest/status") or {}
+if st.button("▶️ Run radar backtest", disabled=rstatus.get("in_progress"),
+             help="The first run searches about 45 quarters of filings and downloads prices for "
+                  "1,000+ companies (10–20 minutes). Later runs reuse the cache."):
+    requests.post(f"{api_base}/radar-backtest/run", timeout=10)
+    rstatus["in_progress"] = True
+if rstatus.get("in_progress"):
+    rbar = st.progress(0.0, text="Starting…")
+    while True:
+        rstatus = _get("/radar-backtest/status") or {}
+        if rstatus.get("total"):
+            rbar.progress(min(1.0, rstatus["done"] / rstatus["total"]),
+                          text=f"{rstatus.get('stage', '')}: {rstatus['done']} of {rstatus['total']}")
+        if not rstatus.get("in_progress"):
+            break
+        time.sleep(3)
+    st.rerun()
+if rstatus.get("error"):
+    st.error(f"Last radar backtest failed: {rstatus['error']}")
+
+rb = _get("/radar-backtest/latest", timeout=60)
+if not rb:
+    st.info("No radar backtest yet.")
+else:
+    st.caption(f"{rb['events']:,} company-quarters · price data found for {rb['coverage_pct']}% of them "
+               f"(the rest are mostly delisted, which flatters results: survivorship bias) · "
+               f"{rb['quarters'][0]} → {rb['quarters'][-1]}")
+    bench = st.radio("Compare against", ["IWM", "SPY"], horizontal=True,
+                     format_func=lambda b: "IWM (small caps)" if b == "IWM" else "SPY (S&P 500)",
+                     help="Most radar companies are small, so IWM is the fairer benchmark.")
+    labels = {"new": "Newly saying it (not in prior 12 months)",
+              "persistent": "Already saying it",
+              "new_with_insider_buying": "Newly saying it + insiders buying",
+              "all": "All companies saying it"}
+    rows = []
+    for g, label in labels.items():
+        for h in (3, 6, 12):
+            r = rb["results"][g][f"{bench}_{h}m"]
+            rows.append({"Group": label, "Horizon": f"{h} months", "Companies": r["events"],
+                         "Avg excess return": f"{r['mean_excess_pct']:+.2f}%" if r["mean_excess_pct"] is not None else "—",
+                         "t-stat": r["t_stat"] if r["t_stat"] is not None else "—",
+                         "Median": f"{r['median_excess_pct']:+.2f}%" if r["median_excess_pct"] is not None else "—",
+                         "Share beating": f"{r['pct_beating']}%" if r["pct_beating"] is not None else "—"})
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.caption("Average = mean of each quarter's average, so one hot quarter counts once. "
+               "t-stat across quarters: under about 2 in size is noise. 6- and 12-month windows overlap, "
+               "which overstates their t-stats. The median shows whether a few huge winners drive the average.")
+    d = rb["new_vs_persistent"]
+    st.markdown("**New minus persistent** (does *newness* matter?): " + " · ".join(
+        f"{h}m: {d[f'{bench}_{h}m']['mean_diff_pct']:+.2f}% (t {d[f'{bench}_{h}m']['t_stat']})"
+        for h in (3, 6, 12) if d[f"{bench}_{h}m"]["mean_diff_pct"] is not None))
+    with st.expander("Most recent 'newly saying it' companies"):
+        st.dataframe(pd.DataFrame([{
+            "Quarter": e["quarter"], "Ticker": e["ticker"], "Company": e["name"],
+            "Phrases": ", ".join(e["phrases"]),
+            "Next 3 months": f"{e['fwd_3m'] * 100:+.1f}%" if e.get("fwd_3m") is not None else "—",
+            "Insiders buying": "yes" if e.get("insider_buy") else "",
+        } for e in rb["recent_new"]]), width="stretch", hide_index=True)
+
+# -----------------------------------------------------------------------------
 # Live track record
 # -----------------------------------------------------------------------------
 

@@ -423,6 +423,7 @@ else:
                     "Ticker": s["ticker"],
                     "Score": s["score"],
                     "Own tightness": (s.get("own_tightness") or {}).get("mentions"),
+                    "Insiders buying (90d)": (s.get("insider") or {}).get("buyers"),
                     "P/E": _pe(s),
                     "Rev growth (FY)": (s.get("valuation") or {}).get("revenue_growth_annual"),
                     "Flagged by mega-cap": s.get("mega_cap_ticker") if s.get("matched", True) else "—",

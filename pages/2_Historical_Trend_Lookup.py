@@ -65,6 +65,94 @@ def _fetch_stored(ticker: str) -> Optional[Dict]:
         return None
 
 
+def _fetch_aftermath(ticker: str, filing_date: str) -> Optional[Dict]:
+    try:
+        resp = requests.get(f"{api_base}/historical/{ticker}/aftermath",
+                            params={"filing_date": filing_date}, timeout=600)
+        return resp.json() if resp.ok else None
+    except requests.RequestException:
+        return None
+
+
+def _pct(v) -> str:
+    return f"{v:+.1f}%" if v is not None else "—"
+
+
+def _render_aftermath(am: Dict):
+    if not am["window_complete"]:
+        st.caption(f"Less than 12 months have passed; showing what's happened up to {am['window_end']}.")
+
+    # 1. Stock
+    st.markdown("**How the stock did after this filing**")
+    cols = st.columns(4)
+    for col, h in zip(cols, ("3m", "6m", "12m")):
+        r = am["stock"].get(h)
+        if r and r["return_pct"] is not None:
+            col.metric(f"{h[:-1]} months later", _pct(r["return_pct"]),
+                       delta=f"{r['vs_spy_pct']:+.1f} pts vs S&P 500" if r["vs_spy_pct"] is not None else None)
+        else:
+            col.metric(f"{h[:-1]} months later", "—", help="Not enough time has passed")
+    t = am["stock"]["to_today"]
+    cols[3].metric("Filing → today", _pct(t["return_pct"]), help=f"S&P 500 over the same period: {_pct(t['spy_pct'])}")
+
+    # 2. Money into other companies
+    st.markdown("**Did it put money into, or sign with, other companies?**")
+    deals = am["counterparty_deals"]
+    if deals:
+        st.caption("From the *other* company's 8-K. A deal that's small for a giant is material for the "
+                   "smaller company, which must disclose it.")
+        st.dataframe(pd.DataFrame([{
+            "Date": d["date"],
+            "What": "💰 Invested in them" if d["relationship"] == "invested" else "🤝 Agreement",
+            "Company": d["company"], "Ticker": d["ticker"] or "—", "Industry": d["industry"] or "—",
+            "Their stock, next 12m": _pct(d["return_12m_pct"]),
+            "S&P 500, same 12m": _pct(d["spy_12m_pct"]),
+            "Their stock, to today": _pct(d["return_to_today_pct"]),
+            "Filing": d["url"],
+        } for d in deals]), width="stretch", hide_index=True,
+            column_config={"Filing": st.column_config.LinkColumn("Filing", display_text="8-K")})
+        with st.expander("What each filing says"):
+            for d in deals:
+                st.markdown(f"**{d['date']} · {d['company']}**: “{d['evidence']}”")
+    else:
+        st.caption("No other company's 8-K named it as an investor or counterparty in this period.")
+
+    tf = am.get("thirteen_f")
+    if tf and tf["positions"]:
+        st.markdown(f"**New or bigger stakes in public companies** (its own 13F: "
+                    f"{tf['from_filing'] or 'first filing'} → {tf['to_filing']})")
+        st.dataframe(pd.DataFrame([{
+            "Ticker": p["ticker"] or "—", "Company": p["company"], "Industry": p["industry"] or "—",
+            "New / added": p["change"], "Position value": f"${(p['value'] or 0) / 1e6:,.0f}M",
+            "Stock, next 12m": _pct(p["return_12m_pct"]), "Stock, to today": _pct(p["return_to_today_pct"]),
+        } for p in tf["positions"]]), width="stretch", hide_index=True)
+
+    if am["own_deals"]:
+        st.markdown("**Its own 8-K agreements** (commercial and M&A; debt excluded)")
+        for d in am["own_deals"]:
+            st.markdown(f"- {d['date']} · {d['type'].replace('_', ' ')}"
+                        + (f" with **{d['counterparty']}**" if d.get("counterparty") else "")
+                        + f": “{d['evidence'][:300]}…” [filing]({d['url']})")
+
+    # 3. In-house
+    st.markdown("**Did it fix it in-house, and say so?**")
+    cap = am.get("capex")
+    if cap and cap["change_pct"] is not None:
+        st.write(f"CapEx: ${cap['before_usd'] / 1e9:,.1f}B (FY ending {cap['before_fy']}) → "
+                 f"${cap['after_usd'] / 1e9:,.1f}B (FY ending {cap['after_fy']}), **{cap['change_pct']:+.0f}%**.")
+    disc = am["disclosed"]
+    if disc["in_house"]:
+        st.markdown("*Building or doing it itself:*")
+        for x in disc["in_house"]:
+            st.write(f"> {x['sentence']}  \n— {x['form']} filed {x['date']}")
+    if disc["secured_supply"]:
+        st.markdown("*Securing supply by contract (prepayments, long-term supply / power agreements):*")
+        for x in disc["secured_supply"]:
+            st.write(f"> {x['sentence']}  \n— {x['form']} filed {x['date']}")
+    if not disc["in_house"] and not disc["secured_supply"]:
+        st.caption("No in-house or secured-supply statements found in its filings from this period.")
+
+
 result = None
 if run_clicked and ticker_input:
     with st.spinner(f"Fetching and scanning up to {max_years} years of {ticker_input}'s 10-Ks..."):
@@ -105,18 +193,47 @@ if result and result.get("signal_trend") is not None:
             title=f"{ticker_input} — bottleneck-language signals by filing year",
         )
         fig.update_layout(yaxis_range=[0, 1.05])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
-        st.markdown("**Evidence by year:**")
-        for _, row in df.sort_values("fiscal_year_end", ascending=False).iterrows():
-            with st.expander(f"{row['fiscal_year_end']} — {row['category']} ({row['confidence']:.0%})"):
-                st.write(f"“{row['evidence']}”")
+        st.markdown("### Each filing, and what happened next")
+        st.caption(
+            "For every 10-K: what it said, then over the following 12 months, how the stock did, "
+            "which companies it put money into or signed with (and how *their* stocks did), and "
+            "what it disclosed doing in-house. The link between a deal and the bottleneck is "
+            "inferred from timing and wording; companies rarely say \"we invested in X to fix Y\"."
+        )
+        filing_dates = sorted(df["fiscal_year_end"].unique(), reverse=True)
+        if st.button("Load “what happened next” for every year",
+                     help="About 10–60 seconds per year on first load; cached afterwards."):
+            for fd in filing_dates:
+                st.session_state[f"aftermath_{ticker_input}_{fd}"] = True
+
+        for fd in filing_dates:
+            year_rows = df[df["fiscal_year_end"] == fd].sort_values("confidence", ascending=False)
+            st.markdown(f"#### 10-K filed {fd}")
+            st.caption(" · ".join(f"{r['category']} ({r['confidence']:.0%})" for _, r in year_rows.iterrows()))
+            with st.expander("What the filing said"):
+                for _, row in year_rows.iterrows():
+                    st.markdown(f"**{row['category']}** ({row['confidence']:.0%}): “{row['evidence']}”")
+            key = f"aftermath_{ticker_input}_{fd}"
+            if not st.session_state.get(key):
+                if st.button("📈 What happened next?", key=f"btn_{key}"):
+                    st.session_state[key] = True
+                    st.rerun()
+                continue
+            with st.spinner(f"Reading the 12 months after {fd}…"):
+                am = _fetch_aftermath(ticker_input, fd)
+            if not am:
+                st.error("Couldn't load what happened next for this filing.")
+                continue
+            _render_aftermath(am)
+            st.divider()
 
     if result.get("capex_trend"):
         st.markdown("**CapEx trend (same company, from SEC XBRL):**")
         capex_df = pd.DataFrame(result["capex_trend"])
         capex_df["CapEx ($B)"] = capex_df["capex_usd"] / 1_000_000_000
         fig2 = px.bar(capex_df, x="fiscal_year_end", y="CapEx ($B)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 elif run_clicked and not ticker_input:
     st.warning("Enter a ticker first.")

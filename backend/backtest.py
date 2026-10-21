@@ -36,7 +36,9 @@ from typing import Dict, List, Optional
 import requests
 from scipy import stats
 
-from . import bottleneck_detector, db, deal_monitor, point_in_time as pit, scoring, sec_utils
+from . import (
+    bottleneck_detector, db, deal_monitor, insider_trading, point_in_time as pit, scoring, sec_utils,
+)
 from .scanner_pipeline import DEFAULT_WATCHLIST
 from .supplier_matcher import SUPPLIER_TAXONOMY, match_suppliers_for_signal
 from sec_financial_data import REVENUE_TAGS
@@ -58,10 +60,12 @@ UNIVERSE = sorted({t for entry in SUPPLIER_TAXONOMY for t in entry["suppliers"]}
 NUMERIC_FACTORS = [
     "score", "own_tightness", "signal_confidence", "relative_volume", "quarterly_revenue_growth_pct",
     "earnings_yield", "sales_yield", "fcf_yield", "growth_adjusted_sales_yield",
+    "insider_buyers",
 ]
 BINARY_FACTORS = [
     "own_tightness_any", "matched", "thesis_intact", "rel_volume_gt_2", "above_200sma",
     "revenue_growth_gt_25", "confirmed_deal", "market_control_leader",
+    "insider_buy_any", "insider_cluster",
 ]
 
 
@@ -182,6 +186,7 @@ def snapshot(as_of: str, session: requests.Session) -> List[Dict]:
         deal = _commercial_deal(ticker, as_of, session)
         rank = ranks.get(ticker)
         tight = bottleneck_detector.supplier_tightness(ticker, as_of, session)
+        insider = insider_trading.insider_activity(cik, as_of) if cik else None
         market_data = {"relative_volume": tech["relative_volume"],
                        "above_200sma": tech["above_200sma"],
                        "quarterly_revenue_growth_pct": rev_growth}
@@ -194,6 +199,7 @@ def snapshot(as_of: str, session: requests.Session) -> List[Dict]:
             market_control_rank=rank,
             valuation=val,
             own_tightness=tight,
+            insider=insider,
         )
         row = {
             "date": as_of, "ticker": ticker, "score": score["score"],
@@ -201,6 +207,9 @@ def snapshot(as_of: str, session: requests.Session) -> List[Dict]:
             "matched": c is not None,
             "own_tightness": tight["mentions"] if tight else None,
             "own_tightness_any": bool(tight and tight["mentions"]),
+            "insider_buyers": insider["discretionary_buyers"] if insider else None,
+            "insider_buy_any": bool(insider and insider["discretionary_buyers"] >= 1),
+            "insider_cluster": bool(insider and insider["discretionary_buyers"] >= 2),
             "signal_confidence": c["best_confidence"] if c else 0.0,
             "thesis_intact": bool(c and c["thesis_intact"]),
             "relative_volume": tech["relative_volume"],
@@ -353,6 +362,7 @@ _EVIDENCE_FACTOR = {
     "confirmed_deal": "confirmed_deal",
     "relative_volume": "rel_volume_gt_2",
     "market_control_leader": "market_control_leader",
+    "insider_buying": "insider_buy_any",
 }
 
 

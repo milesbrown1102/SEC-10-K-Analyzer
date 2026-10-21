@@ -22,6 +22,9 @@ backend/
   point_in_time.py         "what was known on date X" data layer (Pass 5)
   backtest.py              quarterly backtest of the buy score (Pass 5)
   industry_radar.py        SEC full-text-search industry radar (Pass 6)
+  radar_backtest.py        does new tightness language precede returns? (Pass 7)
+  insider_trading.py       Form 4 open-market insider purchases (Pass 7)
+  aftermath.py             what happened in the 12 months after a 10-K (Pass 7)
   market_screener.py       yfinance technical screener
   scanner_pipeline.py      orchestrates everything above
   main.py                  FastAPI app
@@ -38,6 +41,16 @@ Nothing in `app_beautiful_final.py`'s existing single-company flow was
 restructured to use the backend — that stays exactly as it worked before,
 plus the one additive change described in CHANGES.md (persistent SQLite
 caching alongside the existing in-memory `st.cache_data`).
+
+## Quick start
+
+```bash
+./start.sh        # starts backend + app if needed, opens http://localhost:8501
+./start.sh stop   # stops both
+```
+
+The backend refreshes the scan, 13F, radar and insider data weekly on its
+own while it's running.
 
 ## Install
 

@@ -39,6 +39,9 @@ POINTS_ABOVE_200SMA = 10
 POINTS_CONFIRMED_DEAL = 10
 POINTS_RELATIVE_VOLUME = 0
 POINTS_MARKET_CONTROL_LEADER = 0
+# Insider open-market buying (Form 4): recorded by the backtest, shown as
+# info until the evidence supports a weight.
+POINTS_INSIDER_BUYING = 0
 
 # Growth-adjusted sales yield = (revenue / market cap) x revenue growth %.
 # Cut-offs are the top and middle thirds of the 2017-2026 backtest
@@ -61,6 +64,7 @@ def current_weights() -> Dict[str, int]:
         "confirmed_deal": POINTS_CONFIRMED_DEAL,
         "relative_volume": POINTS_RELATIVE_VOLUME,
         "market_control_leader": POINTS_MARKET_CONTROL_LEADER,
+        "insider_buying": POINTS_INSIDER_BUYING,
     }
 
 
@@ -83,6 +87,7 @@ def compute_buy_score(
     market_control_rank: Optional[int] = None,
     valuation: Optional[Dict] = None,
     own_tightness: Optional[Dict] = None,
+    insider: Optional[Dict] = None,
 ) -> Dict:
     """
     Returns {'ticker', 'score' (0-100), 'breakdown': [{'key','factor','points','max','why'}, ...]}.
@@ -157,6 +162,15 @@ def compute_buy_score(
         0, POINTS_MARKET_CONTROL_LEADER,
         (f"Ranked #{market_control_rank} by revenue in its matched group. " if market_control_rank
          else "") + "Not scored: negative in the backtest")
+
+    if insider is not None:
+        n, disc, val = insider.get("buyers", 0), insider.get("discretionary_buyers", 0), insider.get("total_value", 0)
+        add("insider_buying", "Insiders buying on the open market, last 90 days (info only)", 0,
+            POINTS_INSIDER_BUYING,
+            (f"{n} officer/director buyer(s), ${val:,.0f} total"
+             + (f", {n - disc} under pre-set 10b5-1 plans" if n > disc else "")
+             + ". Not scored until the backtest supports it")
+            if n else "No officer or director open-market purchases filed in the last 90 days")
 
     total = sum(b["points"] for b in breakdown)
     return {"ticker": ticker, "score": total, "breakdown": breakdown}

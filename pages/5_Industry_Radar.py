@@ -183,6 +183,20 @@ with tabs[3]:
                            "If the radar listed it, the phrase was probably in a risk factor or negated.")
             for flag in s.get("caution_flags", []):
                 st.warning(flag)
+            ins = d.get("insider") or {}
+            if ins.get("buyers"):
+                st.markdown(
+                    f"**Insider buying (last 90 days):** {ins['buyers']} officer/director buyer(s), "
+                    f"${ins['total_value']:,.0f} total"
+                    + (f", {ins['buyers'] - ins['discretionary_buyers']} under pre-set plans"
+                       if ins["buyers"] > ins["discretionary_buyers"] else ""))
+                st.dataframe(pd.DataFrame([{
+                    "Filed": r["filing_date"], "Insider": r["owner_name"],
+                    "Role": r["title"] or r["relationship"], "Shares": f"{r['shares']:,.0f}",
+                    "Price": f"${r['price']:,.2f}", "Value": f"${r['value']:,.0f}",
+                } for r in ins.get("rows", [])]), width="stretch", hide_index=True)
+            elif ins:
+                st.caption("No officer or director open-market purchases in the last 90 days.")
             if d.get("fund_holders"):
                 st.markdown("**Tracked funds (latest 13F):** " + ", ".join(
                     f"{h['manager']} ({h['change_type']}, {h['weight_curr_pct']:.1f}% of portfolio)"

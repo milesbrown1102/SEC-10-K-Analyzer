@@ -156,7 +156,8 @@ if failed:
         for m in failed:
             st.write(f"**{m['name']}**: {m['error']}")
 
-tabs = st.tabs(["📈 Consensus buys", "👤 By manager", "🔗 Overlap with Scanner picks"])
+tabs = st.tabs(["📈 Consensus buys", "👤 By manager", "🔗 Overlap with Scanner picks",
+                "🧑‍💼 Insider buying (Form 4)"])
 
 # -----------------------------------------------------------------------------
 # Consensus
@@ -288,3 +289,51 @@ with tabs[2]:
             })
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         st.caption(f"Scanner run #{overlap['scan_run_id']}.")
+
+
+# -----------------------------------------------------------------------------
+# Insider buying (Form 4)
+# -----------------------------------------------------------------------------
+
+with tabs[3]:
+    st.subheader("Companies whose own executives are buying")
+    st.caption(
+        "Open-market purchases by officers and directors with their own money, from Form 4 filings. "
+        "Insiders sell for many reasons but buy for essentially one. Several insiders buying at once "
+        "(a *cluster*) is the pattern with the most research support. Grants, option exercises and "
+        "sales are excluded."
+    )
+    ins = _get("/insiders/status") or {}
+    if not ins.get("quarters_loaded"):
+        st.info("Insider data isn't loaded yet.")
+        if st.button("Load insider data (about 2 minutes)"):
+            requests.post(f"{api_base}/insiders/refresh", timeout=10)
+            st.rerun()
+    else:
+        st.caption(f"{ins['purchases']:,} purchases since 2017 · quarterly SEC data through "
+                   f"{ins['covers_through']}; later filings are read individually for scored companies.")
+        c1, c2, c3 = st.columns(3)
+        days = c1.select_slider("Window", [30, 60, 90, 180, 365], value=90,
+                                format_func=lambda d: f"last {d} days")
+        min_buyers = c2.slider("Minimum different insiders", 1, 6, 2)
+        min_avg = c3.select_slider("Minimum average purchase per insider",
+                                   [0, 10_000, 25_000, 50_000, 100_000, 250_000], value=50_000,
+                                   format_func=lambda v: f"${v:,}",
+                                   help="Filters out small, plan-style buying, e.g. foreign companies "
+                                        "whose insiders began filing Form 4s in 2026.")
+        data = _get(f"/insiders/clusters?days={days}&min_buyers={min_buyers}", timeout=60) or {}
+        clusters = [c for c in data.get("clusters", []) if c["avg_per_buyer"] >= min_avg]
+        if not clusters:
+            st.info("No companies match. Try a longer window or fewer insiders.")
+        else:
+            st.dataframe(pd.DataFrame([{
+                "Ticker": c["ticker"], "Company": c["issuer_name"],
+                "Insiders buying": c["buyers"],
+                "Not on a pre-set plan": c["discretionary_buyers"],
+                "Total bought": _fmt_usd(c["total_value"]),
+                "Avg per insider": _fmt_usd(c["avg_per_buyer"]),
+                "Latest filing": c["latest_filing"],
+                "Who": ", ".join(c["titles"]),
+            } for c in clusters]), width="stretch", hide_index=True)
+            st.caption("Not scored or backtested on its own here; the Score Validation page measures it as a "
+                       "factor. Look up any ticker on the Industry Radar's drill-down for the full picture.")
