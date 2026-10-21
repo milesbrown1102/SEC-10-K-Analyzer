@@ -1,5 +1,31 @@
 # SEC 10-K Analyzer — Changes
 
+## Pass 8: Chokepoint web app, deal amounts and reasons, "what's next"
+
+- **Web app (`web/`, served at http://127.0.0.1:8000/app)** — React +
+  TypeScript + Tailwind + Recharts on the existing API. Overview, What's
+  next (industry ranking with adjustable source weights), Company pages,
+  Smart money, Scarcity radar, Scanner, Track record. Dark theme on the
+  validated chart palette; ticker search; mobile layout. `start.sh`
+  builds it on first run and opens it. Use 127.0.0.1, not localhost:
+  another local server holds IPv6 port 8000.
+- **Company profile (`/company/{t}/profile`)** — what it does (10-K, or
+  the IPO prospectus for new listings), which funds bought, the quarter
+  and price range they bought in and the move since, insiders,
+  connections, buy score, and a rule-based case for / case against.
+- **Deals** — stated amounts, "why the counterparty's stock moved"
+  (market vs revenue vs re-rating, size, financing risk), patterns by deal
+  type and size; press-release announcements included; the company must
+  be a party, not a passing mention.
+- **What's next (`opportunities.py`)** — industries scored on giants'
+  investments, rising scarcity, fund buying and insider clusters. Stakes
+  that only became visible through an IPO (Alphabet's SpaceX) are
+  labelled and not scored: that had inflated "giants' investments" from
+  $67B to $163B.
+- **Smart money** — consensus buys show the move since the funds' quarter
+  ended (last quarter's favorites mostly fell: CBRS -47%, STM -36%).
+- Historical lookup uses full filing history (Meta showed 2 of 6 years).
+
 ## Pass 7: what happened next, insider buying, radar backtest, auto-refresh
 
 - **One-command start (`./start.sh`, `./start.sh stop`)** — starts the

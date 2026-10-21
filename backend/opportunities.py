@@ -74,7 +74,12 @@ def giants_money(session: requests.Session, progress=None) -> List[Dict]:
             if p["change"] != "new" or not p["ticker"]:
                 continue
             prof = _profile_for_ticker(p["ticker"], session)
-            rows.append({"giant": giant, "source": "13F", "date": tf["to_filing"], "relationship": "invested",
+            # A "new" 13F line for a company that only just listed is usually a
+            # stake held privately for years (Alphabet has owned part of SpaceX
+            # since 2015), not fresh money: label it, and don't score it.
+            first_trade = min(pit.price_history(p["ticker"]) or {"9999": 0})
+            relationship = "ipo_stake" if first_trade > (tf["from_filing"] or start) else "invested"
+            rows.append({"giant": giant, "source": "13F", "date": tf["to_filing"], "relationship": relationship,
                          "company": p["company"], "ticker": p["ticker"], "sic": prof.get("sic"),
                          "industry": prof.get("industry"), "amount_usd": p["value"], "url": None,
                          "return_to_today_pct": p["return_to_today_pct"]})
@@ -152,8 +157,9 @@ def build_rankings(giants: List[Dict], scarcity: List[Dict], funds: List[Dict], 
             # Count + log of dollars, so one $5B stake doesn't swamp everything.
             raw["giants"][g["sic"]] += 1 + math.log10(1 + (g["amount_usd"] or 0) / 1e8)
         amt = f" (${g['amount_usd'] / 1e9:,.2f}B)" if g.get("amount_usd") else ""
-        touch(g["sic"], g["ticker"], g["company"], "giants",
-              f"{g['giant']} {'invested' if g['relationship'] == 'invested' else 'agreement'}{amt}, {g['date']}")
+        what = {"invested": "invested", "agreement": "agreement", "announced": "announced partnership",
+                "ipo_stake": "stake visible after IPO"}.get(g["relationship"], g["relationship"])
+        touch(g["sic"], g["ticker"], g["company"], "giants", f"{g['giant']} {what}{amt}, {g['date']}")
     for s in scarcity:
         if is_fin(s["sic"]):
             continue
@@ -172,6 +178,16 @@ def build_rankings(giants: List[Dict], scarcity: List[Dict], funds: List[Dict], 
         raw["insiders"][i["sic"]] += 1
         touch(i["sic"], i["ticker"], i["company"], "insiders",
               f"{i['buyers']} insiders bought ${i['total_value'] / 1e6:,.1f}M")
+
+    # Warrants / units (CORZW, CORZU) are the same company as the common stock.
+    for sic, comps in companies.items():
+        for key in list(comps):
+            c = comps[key]
+            base = (c["ticker"] or "")[:-1]
+            if c["ticker"] and len(c["ticker"]) >= 4 and c["ticker"][-1] in "WU" and base in comps:
+                for src, notes in c["sources"].items():
+                    comps[base]["sources"].setdefault(src, []).extend(n for n in notes if n not in comps[base]["sources"].get(src, []))
+                del comps[key]
 
     points = {s: _rank_points(raw[s]) for s in SOURCES}
     sics = set().union(*(points[s].keys() for s in SOURCES))

@@ -528,10 +528,21 @@ def run_institutional_report(ciks: Optional[List[str]] = None,
             verify_splits(a)
             a["changes"].sort(key=lambda r: -abs(r["est_value_change"]))
 
+    consensus = build_consensus(activities)
+    # How each widely-bought stock has done since the quarter the funds bought in ended.
+    from . import point_in_time as pit
+    quarter_end = max((a["report_date"] for a in activities if a.get("report_date")), default=None)
+    for row in consensus:
+        row["since_quarter_end_pct"] = None
+        if quarter_end and row.get("ticker") and row["buyer_count"] >= 2:
+            p0, p1 = pit.price_on(row["ticker"], quarter_end), pit.price_on(row["ticker"], pit.today())
+            if p0 and p1:
+                row["since_quarter_end_pct"] = round((p1 / p0 - 1) * 100, 1)
     report = {
         "generated_at": time.time(),
+        "quarter_end": quarter_end,
         "managers": activities,
-        "consensus": build_consensus(activities),
+        "consensus": consensus,
     }
     db.cache_set("institutional_report", "latest", report)
     return report

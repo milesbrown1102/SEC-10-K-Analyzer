@@ -559,6 +559,33 @@ def company_profile_endpoint(ticker: str):
     return result
 
 
+@app.get("/search")
+def search(q: str, limit: int = 8):
+    """Ticker / company-name lookup over SEC's ticker list, exact ticker first."""
+    q = q.strip().upper()
+    if not q:
+        return []
+    rows = sec_utils.get_ticker_lookup(sec_utils.make_sec_session())
+    exact, prefix, name = [], [], []
+    for r in rows:
+        t, title = r["ticker"].upper(), r["title"]
+        if t == q:
+            exact.append(r)
+        elif t.startswith(q):
+            prefix.append(r)
+        elif len(q) >= 3 and q in title.upper():
+            name.append(r)
+    out, seen = [], set()
+    for r in exact + sorted(prefix, key=lambda r: len(r["ticker"])) + name:
+        if r["cik_str"] in seen:
+            continue
+        seen.add(r["cik_str"])
+        out.append({"ticker": r["ticker"].upper(), "name": r["title"]})
+        if len(out) >= limit:
+            break
+    return out
+
+
 @app.get("/prices/{ticker}")
 def prices(ticker: str, years: float = 3.0):
     """Daily adjusted closes (weekly when the range is over 2 years), plus SPY over the same range."""
@@ -688,3 +715,32 @@ def schedule_status():
                   if ts else None, "due": _age_days(ts) >= REFRESH_AFTER_DAYS}
                  for n, ts, _ in _scheduled_jobs()],
     }
+
+
+# =============================================================================
+# The web app (web/, built with `npm run build`) at /app. Unknown paths under
+# /app fall back to index.html so client-side routes like /app/company/MU work
+# on reload and when shared.
+# =============================================================================
+
+from pathlib import Path  # noqa: E402
+
+from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
+
+WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/app/")
+
+
+@app.get("/app", include_in_schema=False)
+@app.get("/app/{path:path}", include_in_schema=False)
+def web_app(path: str = ""):
+    if not WEB_DIST.exists():
+        raise HTTPException(status_code=404, detail="Web app not built — run `npm run build` in web/")
+    target = (WEB_DIST / path).resolve()
+    if path and target.is_file() and WEB_DIST in target.parents:
+        return FileResponse(target)
+    return FileResponse(WEB_DIST / "index.html")

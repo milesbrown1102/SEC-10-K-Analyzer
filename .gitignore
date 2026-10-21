@@ -16,3 +16,8 @@ node_modules/
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Web app build output and dependencies (start.sh builds it)
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo

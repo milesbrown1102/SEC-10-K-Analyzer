@@ -45,12 +45,16 @@ caching alongside the existing in-memory `st.cache_data`).
 ## Quick start
 
 ```bash
-./start.sh        # starts backend + app if needed, opens http://localhost:8501
+./start.sh        # starts everything, opens the web app at http://127.0.0.1:8000/app
 ./start.sh stop   # stops both
 ```
 
 The backend refreshes the scan, 13F, radar and insider data weekly on its
 own while it's running.
+
+Web app development: `cd web && npm run dev` (hot reload at
+http://localhost:5173/app/, API proxied to :8000). `npm run build` updates
+what the backend serves.
 
 ## Install
 

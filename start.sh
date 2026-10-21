@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Start the SEC 10-K Analyzer: FastAPI backend + Streamlit app, then open
-# it in the Windows browser. Safe to re-run: anything already running is
-# left alone.
+# Start Chokepoint: the FastAPI backend (which also serves the web app at
+# /app) plus the older Streamlit app, then open the web app in the Windows
+# browser. Safe to re-run: anything already running is left alone.
 #
-#   ./start.sh          start (or reuse) both servers and open the browser
+#   ./start.sh          start (or reuse) everything and open the browser
 #   ./start.sh stop     stop both servers
+#
+# The app is at http://127.0.0.1:8000/app, not localhost: on this machine
+# another project's server holds IPv6 port 8000, and Windows resolves
+# "localhost" to IPv6 first.
 
 cd "$(dirname "$0")"
 LOGS="${TMPDIR:-/tmp}/sec-analyzer-logs"
@@ -20,6 +24,11 @@ if [ "$1" = "stop" ]; then
         [ -n "$pid" ] && kill "$pid" && echo "Stopped server on port $port"
     done
     exit 0
+fi
+
+if [ ! -f web/dist/index.html ]; then
+    echo "Building the web app (first run)…"
+    (cd web && npm install --no-audit --no-fund >/dev/null && npm run build >/dev/null) || echo "Web build failed — run 'npm run build' in web/"
 fi
 
 if curl -s -m 2 http://127.0.0.1:8000/health >/dev/null; then
@@ -44,8 +53,9 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 
-echo "Open http://localhost:8501"
+echo "Web app:        http://127.0.0.1:8000/app"
+echo "Streamlit app:  http://localhost:8501 (older interface)"
 # Open in the Windows default browser when running under WSL.
 if command -v cmd.exe >/dev/null; then
-    (cd /mnt/c && cmd.exe /c start "" "http://localhost:8501" >/dev/null 2>&1)
+    (cd /mnt/c && cmd.exe /c start "" "http://127.0.0.1:8000/app" >/dev/null 2>&1)
 fi

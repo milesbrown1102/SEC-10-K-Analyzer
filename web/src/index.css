@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens. Chart series colors are the validated dark categorical
+   slots 1-4 (CVD-checked against --surface #1a1a19). */
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --raised: #232321;
+  --line: rgba(255, 255, 255, 0.08);
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-3: #898781;
+  --accent: #3987e5;
+  --accent-soft: rgba(57, 135, 229, 0.14);
+  --good: #0ca30c;
+  --bad: #d03b3b;
+  --warn: #fab219;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
+  /* RGB channels of the same colors, for Tailwind opacity modifiers (bg-raised/60). */
+  --page-c: 13 13 13;
+  --surface-c: 26 26 25;
+  --raised-c: 35 35 33;
+  --ink-c: 240 239 236;
+  --ink-2-c: 195 194 183;
+  --ink-3-c: 137 135 129;
+  --accent-c: 57 135 229;
+  --good-c: 12 163 12;
+  --bad-c: 208 59 59;
+  --warn-c: 250 178 25;
+}
+
+html, body, #root { height: 100%; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.tabular { font-variant-numeric: tabular-nums; }
+::selection { background: var(--accent-soft); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2c2c2a; border-radius: 8px; border: 2px solid var(--page); }
+::-webkit-scrollbar-track { background: transparent; }
+
+@layer components {
+  .card { @apply rounded-2xl border border-line bg-surface shadow-card; }
+  .card-pad { @apply p-5 sm:p-6; }
+  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3; }
+  .h-page { @apply text-2xl sm:text-3xl font-semibold tracking-tight text-ink; }
+  .h-section { @apply text-base font-semibold text-ink; }
+  .btn { @apply inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-accent text-white hover:brightness-110; }
+  .btn-ghost { @apply btn border border-line text-ink-2 hover:bg-raised hover:text-ink; }
+  .link { @apply text-accent hover:underline underline-offset-2; }
+  .pill { @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium; }
+  .table-base { @apply w-full text-sm; }
+  .table-base th { @apply px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-ink-3 border-b border-line whitespace-nowrap; }
+  .table-base td { @apply px-3 py-3 border-b border-line text-ink-2 align-top; }
+  .table-base tbody tr { @apply transition-colors hover:bg-raised/60; }
+}
+
+@keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+.skeleton {
+  background: linear-gradient(90deg, #1f1f1e 0px, #2a2a28 160px, #1f1f1e 320px);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: 10px;
+}
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }

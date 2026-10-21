@@ -28,7 +28,7 @@ from . import (
 )
 from universal_section_extractor import extract_all_sections
 
-PROFILE_VERSION = "v2"
+PROFILE_VERSION = "v3"
 
 
 def _plus(d: str, days: int) -> str:
@@ -49,7 +49,7 @@ def describe(cik: str, session: requests.Session) -> Optional[Dict]:
         prospectus = True
     if not f:
         return None
-    key = f"{cik}_{f['accession_number']}"
+    key = f"v2_{cik}_{f['accession_number']}"
     cached = db.cache_get("company_description", key, ttl_seconds=None)
     if cached is not None:
         return cached
@@ -62,7 +62,10 @@ def describe(cik: str, session: requests.Session) -> Optional[Dict]:
     sentences = [s for s in bottleneck_detector._sentences(business)
                  if 80 <= len(s) <= 600 and re.search(r"(?i)\b(?:we|our|the company)\b", s)
                  and not re.search(r"(?i)forward-looking|table of contents|item\s+1", s)]
-    out = {"summary": " ".join(sentences[:3]),
+    summary = " ".join(sentences[:3])
+    # Drop a leading section heading that ran into the first sentence ("BUSINESS Overview We are...").
+    summary = re.sub(r"^(?:[A-Z][A-Z&\s]{3,}\s+)?(?:Overview|General|Our Company|Business)\s+(?=[A-Z])", "", summary)
+    out = {"summary": summary,
            "source": f"{'IPO prospectus' if prospectus else '10-K'} filed {f['filing_date']}",
            "url": sec_utils.get_filing_document_url(cik, f)}
     db.cache_set("company_description", key, out)
