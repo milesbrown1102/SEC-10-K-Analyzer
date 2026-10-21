@@ -1,6 +1,6 @@
 # SEC 10-K Analyzer — Changes
 
-## Pass 8: Chokepoint web app, deal amounts and reasons, "what's next"
+## Pass 8: web app (now named Milestone; first shipped as "Chokepoint"), deal amounts and reasons, "what's next"
 
 - **Web app (`web/`, served at http://127.0.0.1:8000/app)** — React +
   TypeScript + Tailwind + Recharts on the existing API. Overview, What's

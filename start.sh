@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start Chokepoint: the FastAPI backend (which also serves the web app at
+# Start Milestone: the FastAPI backend (which also serves the web app at
 # /app) plus the older Streamlit app, then open the web app in the Windows
 # browser. Safe to re-run: anything already running is left alone.
 #

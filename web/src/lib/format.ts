@@ -1,4 +1,4 @@
-export const BRAND = "Chokepoint";
+export const BRAND = "Milestone";
 
 export function usd(v: number | null | undefined, digits = 1): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";

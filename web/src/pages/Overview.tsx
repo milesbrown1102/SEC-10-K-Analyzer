@@ -39,7 +39,7 @@ export default function Overview() {
             Find the bottleneck <span className="text-accent">before</span> the market does.
           </h1>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-2 sm:text-lg">
-            Chokepoint reads every 10-K, 10-Q and 8-K for signs of scarcity, follows where NVIDIA, Microsoft,
+            Milestone reads every 10-K, 10-Q and 8-K for signs of scarcity, follows where NVIDIA, Microsoft,
             Alphabet and Amazon put their money, tracks what top funds and insiders buy, and tests every signal
             against history.
           </p>

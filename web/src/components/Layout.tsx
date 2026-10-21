@@ -22,7 +22,7 @@ function Logo() {
   return (
     <div className="flex items-center gap-2.5">
       <div className="grid h-8 w-8 place-items-center rounded-lg bg-accent">
-        <svg viewBox="0 0 32 32" className="h-5 w-5" aria-hidden><path d="M7 8h18l-7 8v7l-4 2v-9z" fill="white" /></svg>
+        <svg viewBox="0 0 32 32" className="h-5 w-5" aria-hidden><path d="M3 25 L12 11 L16.5 17.5 L19.5 13.5 L29 25 Z" fill="white" /><path d="M12 11 V4.5" stroke="white" strokeWidth="1.8" strokeLinecap="round" /><path d="M12 4.5 L18.5 6.75 L12 9 Z" fill="white" /></svg>
       </div>
       <span className="text-[17px] font-semibold tracking-tight">{BRAND}</span>
     </div>
