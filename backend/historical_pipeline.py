@@ -46,7 +46,10 @@ def run_historical_trend(ticker: str, session: requests.Session,
         return {"ticker": ticker, "error": f"Could not resolve a CIK for '{ticker}'",
                 "signal_trend": [], "capex_trend": []}
 
-    filings = sec_utils.get_historical_10k_filings(cik, session, max_filings=max_years)
+    # Full filing history, not SEC's "recent" window: for a heavy filer
+    # like Meta that window only reaches back two 10-Ks.
+    from . import point_in_time
+    filings = [f for f in point_in_time.all_filings(cik, session) if f["form"] == "10-K"][:max_years]
     if not filings:
         return {"ticker": ticker, "error": "No 10-K filings found for this ticker",
                 "signal_trend": [], "capex_trend": []}
@@ -74,9 +77,17 @@ def run_historical_trend(ticker: str, session: requests.Session,
         time.sleep(0.1)
 
     capex_trend = capex_pipeline.get_capex_series(cik, session)
+    # Every filing checked — including years with no signals — so the page
+    # can show all of them, not just the ones where something matched.
+    checked = sorted({f["filing_date"] for f in filings}, reverse=True)
+    db.cache_set("historical_filings", ticker, checked)
 
     return {"ticker": ticker, "error": None, "signal_trend": signal_trend,
-            "capex_trend": capex_trend}
+            "capex_trend": capex_trend, "filings": checked}
+
+
+def get_stored_filings(ticker: str) -> List[str]:
+    return db.cache_get("historical_filings", ticker.strip().upper(), ttl_seconds=None) or []
 
 
 def get_stored_historical_trend(ticker: str) -> List[Dict]:

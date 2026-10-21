@@ -202,9 +202,10 @@ FAKE_HISTORICAL_TEXT_NEW = (
 def test_historical_trend_shows_signal_only_in_recent_year():
     mp = _SimpleMonkeypatch()
     mp.setattr(sec_utils, "get_cik_for_ticker", lambda t, s: "0001045810")
-    mp.setattr(sec_utils, "get_historical_10k_filings", lambda cik, s, max_filings=6: [
-        {"form": "10-K", "filing_date": "2013-01-27", "accession_number": "a1", "primary_document": "d1.htm"},
+    from backend import point_in_time
+    mp.setattr(point_in_time, "all_filings", lambda cik, s: [
         {"form": "10-K", "filing_date": "2024-01-26", "accession_number": "a2", "primary_document": "d2.htm"},
+        {"form": "10-K", "filing_date": "2013-01-27", "accession_number": "a1", "primary_document": "d1.htm"},
     ])
 
     def _fake_fetch(cik, filing, session):

@@ -63,6 +63,43 @@ def test_item_sections_extracted():
     print("PASS test_item_sections_extracted")
 
 
+META = ["Meta Platforms", "Meta"]
+
+
+def test_party_rules():
+    assert am.classify_counterparty("Prior to Meta, Arabia was Vice President, Product Operations.", META) is None
+    assert am.classify_counterparty(
+        "The sale of the Company’s interest in Hupecol Meta closed upon execution of the agreement.", META) is None
+    assert am.classify_counterparty("Meta-PURE is part of the program under Cooperative Agreement No. 24.", META) is None
+    r = am.classify_counterparty(
+        "Constellation and Meta signed a 20-year power purchase agreement for the Clinton Clean Energy Center.", META)
+    assert r and r["relationship"] == "agreement", r
+    print("PASS test_party_rules")
+
+
+def test_amount_ignores_market_size():
+    text = "Meta is a leader in a $275 billion market for immersive devices and partnerships."
+    assert am.extract_amount(text, META) is None
+    print("PASS test_amount_ignores_market_size")
+
+
+def test_case_for_and_against():
+    from backend import company_profile as cp
+    case = cp.build_case({
+        "valuation": {"earnings_yield": -0.02, "market_cap": 1e9},
+        "quarterly_revenue_growth_pct": 74.0,
+        "stock": {"above_200sma": False, "return_1y_pct": 20.0},
+        "funds": [{"manager": "Fund A", "change": "new", "window_start": "2026-03-31",
+                   "window_end": "2026-06-30", "since_avg_pct": -50.0,
+                   "price_range": {"low": 169, "high": 311, "avg": 235, "first_trading_day": "2026-05-14"}}],
+    })
+    assert any("+74%" in x for x in case["for"]), case
+    assert any("-50%" in x and "IPO" in x for x in case["against"]), case
+    assert any("Not profitable" in x for x in case["against"])
+    assert any("Small company" in x for x in case["against"])
+    print("PASS test_case_for_and_against")
+
+
 if __name__ == "__main__":
     test_investment_detected()
     test_sold_to_detected()
@@ -70,4 +107,7 @@ if __name__ == "__main__":
     test_product_mention_ignored()
     test_absent_alias()
     test_item_sections_extracted()
+    test_party_rules()
+    test_amount_ignores_market_size()
+    test_case_for_and_against()
     print("\nAll aftermath tests passed.")

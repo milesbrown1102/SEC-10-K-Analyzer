@@ -24,6 +24,7 @@ wording. Companies almost never write "we invested in X to relieve
 shortage Y"; the page shows the evidence so you can judge.
 """
 
+import math
 import re
 import time
 import urllib.parse
@@ -35,11 +36,15 @@ import requests
 from . import bottleneck_detector, db, deal_monitor, institutional_holdings, point_in_time as pit, sec_utils
 from .capex_pipeline import CAPEX_TAGS
 
-AFTERMATH_VERSION = "v2"
+AFTERMATH_VERSION = "v8"
 WINDOW_DAYS = 365
 DEAL_ITEMS = {"1.01", "2.01", "3.02"}
+# Partnerships are often announced by press release (Item 7.01 / 8.01, the
+# release attached as EX-99) rather than as a "material definitive
+# agreement" — softer evidence, labelled "announced".
+ANNOUNCEMENT_ITEMS = {"7.01", "8.01"}
 MAX_FTS_PAGES = 10
-MAX_COUNTERPARTY_DOCS = 120
+MAX_COUNTERPARTY_DOCS = 250
 
 # Names other filers use for the big companies. Everything else falls back
 # to the company's SEC name without its legal suffix ("Vistra Corp." ->
@@ -50,7 +55,10 @@ ALIASES = {
     "GOOGL": ["Alphabet", "Google"],
     "GOOG": ["Alphabet", "Google"],
     "AMZN": ["Amazon.com", "Amazon Web Services"],
-    "META": ["Meta Platforms"],
+    # Press releases say just "Meta" ("Constellation and Meta sign..."); the
+    # product filter below and _ALIAS_EXCLUDE keep out "Meta ads", "Meta
+    # Materials", "OneMeta".
+    "META": ["Meta Platforms", "Meta"],
     "AAPL": ["Apple Inc"],
     "ORCL": ["Oracle"],
     "TSLA": ["Tesla"],
@@ -59,9 +67,14 @@ _LEGAL_SUFFIX = re.compile(
     r"[,.]?\s+(?:inc|incorporated|corp|corporation|co|company|ltd|limited|llc|plc|lp|l\.p|"
     r"holdings?|group|n\.v|s\.a|ag|se|/\w+/)\.?$", re.IGNORECASE)
 
+# Names that contain an alias but are other companies.
+_ALIAS_EXCLUDE = re.compile(r"(?i)\bMeta\s+(?:Materials|Financial|Data)\b|\bmeta[- ]?(?:data|verse)\b")
+
 # A mention that's just about buying the company's products, not a deal with it.
 _PRODUCT_CONTEXT = re.compile(
     r"\b(?:gpus?|chips?|graphics|accelerators?|h100|h200|b200|gb200|gb300|blackwell|hopper|rubin|"
+    r"ads|advertising|advertisers|ad\s+platforms?|platforms|quest|ray-ban|glasses|llama|instagram|"
+    r"facebook|whatsapp|threads|pixel|campaigns?|marketplace|business\s+suite|"
     r"servers?|hardware|cloud\s+(?:credits|services)|instances?|azure|aws\s+marketplace|"
     r"powered|based|certified|inception|partner\s+network|marketplace|app\s+store)\b",
     re.IGNORECASE)
@@ -159,33 +172,122 @@ def _item_sections(text: str) -> str:
     return " ".join(parts)
 
 
+# Words that may follow the alias and still mean the same company.
+_SAME_COMPANY_FOLLOWERS = {"platforms", "inc", "inc.", "corporation", "corp", "corp.", "llc", "cloud",
+                           "and", "to", "has", "have", "will", "is", "was", "agreed", "signed", "entered",
+                           "selected", "announced", "plans", "intends", "committed", "would", "the"}
+_PARTY_BEFORE = re.compile(r"(?i)\b(?:with|between|and|from|by|to|for)\s+(?:the\s+)?$")
+_PARTY_AFTER = re.compile(
+    r"(?i)^(?:,?\s*(?:Inc\.?|Platforms,?\s*Inc\.?|Corporation|Corp\.?|LLC))?\s*(?:\([^)]{0,40}\)\s*)?,?\s*"
+    r"(?:and\b|has\b|have\b|will\b|signed\b|selected\b|agreed\b|entered\b|announced\b|committed\b|"
+    r"is\s+(?:investing|acquiring|purchasing)|plans\b|intends\b)")
+_DEAL_WORDS = re.compile(
+    r"(?i)\b(?:agreement|contract|partnership|collaboration|arrangement|order\s+form|"
+    r"power\s+purchase|supply|lease|investment|alliance|joint\s+venture|commitment)\b")
+_ALIAS_INVESTS = r"[^.;]{0,80}?\b(?:invest\w*|agreed\s+to\s+(?:purchase|acquire|buy)|will\s+(?:purchase|acquire|buy)|purchased|acquired|subscribed|led|anchored)\b"
+
+
+# Executive biographies mention past employers ("Prior to Meta, he was...").
+_BIO = re.compile(
+    r"(?i)\b(?:prior\s+to|previously|formerly|served\s+as|serving\s+as|joined|he\s+led|she\s+led|"
+    r"his\s+career|her\s+career|tenure|was\s+(?:vice\s+president|vp|director|ceo|cfo|head|chief))\b")
+_NOT_A_PARTY_BEFORE = {"with", "and", "the", "between", "from", "by", "to", "for"}
+
+
+def _is_party(s: str, m: re.Match) -> bool:
+    """The alias is a party to the sentence's deal, not a passing mention or another company's name."""
+    prev = re.search(r"([A-Za-z]+)\s+$", s[:m.start()])
+    if prev and prev.group(1)[0].isupper() and prev.group(1).lower() not in _NOT_A_PARTY_BEFORE \
+            and m.start() > 0 and s[m.start() - 1] == " " and not re.search(r"[.;:]\s*$", s[:prev.start()]):
+        return False  # "Hupecol Meta" is a different company
+    nxt = re.match(r"\s*([A-Za-z.\-]+)", s[m.end():])
+    if s[m.end():m.end() + 1] == "-":
+        return False  # "Meta-PURE", "NVIDIA-powered"
+    if nxt and nxt.group(1)[0].isupper() and nxt.group(1).lower() not in _SAME_COMPANY_FOLLOWERS:
+        return False  # "Meta Healthcare Group" is a different company
+    return bool(_PARTY_BEFORE.search(s[max(0, m.start() - 30):m.start()])
+                or _PARTY_AFTER.search(s[m.end():m.end() + 80]))
+
+
 def classify_counterparty(section_text: str, aliases: List[str]) -> Optional[Dict]:
     """
-    Pure function. How `aliases` appear in an 8-K's deal sections:
-    'invested' (bought the filer's securities), 'agreement' (counterparty
-    to a material agreement), or None (absent, or only as a product the
-    filer buys/uses — "NVIDIA GPUs").
+    Pure function. How `aliases` appear in a deal filing or press release:
+    'invested' (the company bought or committed to buy the filer's
+    securities), 'agreement' (a party to a deal), or None — absent, only a
+    product the filer uses ("NVIDIA GPUs", "Meta ads"), or only mentioned
+    in passing rather than as a party.
+    """
+    names = "|".join(re.escape(a) for a in aliases)
+    alias_re = re.compile(r"\b(?:" + names + r")\b", re.IGNORECASE)
+    invests_re = re.compile(r"(?i)\b(?:" + names + r")\b" + _ALIAS_INVESTS)
+    invest_from_re = re.compile(r"(?i)\b(?:investment|purchase|financing|backing)\s+(?:from|by)\s+(?:" + names + r")\b")
+    sentences = re.split(r"(?<=[.;])\s+(?=[A-Z(“\"])", section_text)
+    best = None
+    for s in sentences:
+        letters = [c for c in s if c.isalpha()]
+        if _BIO.search(s) or (letters and sum(c.isupper() for c in letters) > 0.6 * len(letters)):
+            continue  # executive bio, or an all-caps legal disclaimer
+        for m in alias_re.finditer(s):
+            if _ALIAS_EXCLUDE.search(s[max(0, m.start() - 5):m.end() + 15]):
+                continue
+            if _PRODUCT_CONTEXT.search(s[m.end():m.end() + 40]) and not _DEAL_WORDS.search(s):
+                continue
+            sold_to = _SOLD_TO.search(s)
+            invested = _SECURITIES.search(s) and (
+                invests_re.search(s) or invest_from_re.search(s)
+                or (sold_to and alias_re.search(s[sold_to.end():sold_to.end() + 80])))
+            if invested:
+                return {"relationship": "invested", "evidence": s[:500]}
+            if _is_party(s, m) and _DEAL_WORDS.search(s) and best is None:
+                best = {"relationship": "agreement", "evidence": s[:500]}
+            break
+    return best
+
+
+_MONEY = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|b)?\b", re.IGNORECASE)
+_SHARES_AT_PRICE = re.compile(
+    r"(\d[\d,]{2,})\s+(?:shares|units)[^.;]{0,160}?(?:price|purchase\s+price|price\s+per\s+share)\s+of\s+"
+    r"\$\s?(\d[\d,]*(?:\.\d+)?)\s*per\s+(?:share|unit)", re.IGNORECASE)
+_AMOUNT_CONTEXT = re.compile(
+    r"\b(?:aggregate\s+purchase\s+price|gross\s+proceeds|purchase\s+price|investment\s+of|invest(?:ed)?\s+"
+    r"(?:up\s+to\s+)?\$|for\s+(?:an\s+)?aggregate|total\s+consideration|commitment\s+of)\b", re.IGNORECASE)
+_SCALE = {"billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mm": 1e6, "m": 1e6, "thousand": 1e3}
+
+
+def _money(num: str, unit: Optional[str]) -> float:
+    return float(num.replace(",", "")) * _SCALE.get((unit or "").lower(), 1.0)
+
+
+def extract_amount(section_text: str, aliases: List[str]) -> Optional[Dict]:
+    """
+    Pure function. Dollar size of the deal, from sentences that name the
+    company or describe the purchase price: stated amounts ("$5.0 billion",
+    "aggregate purchase price of $2,000,000,000") or shares x per-share
+    price. Returns the largest plausible figure, with the sentence it
+    came from; None if the filing states no amount.
     """
     alias_re = re.compile(r"\b(?:" + "|".join(re.escape(a) for a in aliases) + r")\b", re.IGNORECASE)
-    sentences = re.split(r"(?<=[.;])\s+(?=[A-Z(“\"])", section_text)
-    best, evidence = None, None
-    for s in sentences:
-        m = alias_re.search(s)
-        if not m:
+    best = None
+    for s in re.split(r"(?<=[.;])\s+(?=[A-Z(“\"])", section_text):
+        if not (alias_re.search(s) or _AMOUNT_CONTEXT.search(s)):
             continue
-        after = s[m.end():m.end() + 40]
-        if _PRODUCT_CONTEXT.search(after) and not re.search(r"(?i)\bagreement\b", s):
-            continue  # "NVIDIA GPUs", "NVIDIA-powered"
-        window = s[max(0, m.start() - 200):m.end() + 200]
-        sold_to = _SOLD_TO.search(s)
-        invested = ((_INVEST_VERBS.search(window) and _SECURITIES.search(window))
-                    or (sold_to and alias_re.search(s[sold_to.end():sold_to.end() + 80])))
-        if invested:
-            return {"relationship": "invested", "evidence": s[:500]}
-        if re.search(r"(?i)\b(?:agreement|contract|partnership|collaboration|arrangement)\b", s) and \
-                re.search(r"(?i)\b(?:with|between|and)\b", s):
-            best, evidence = "agreement", s[:500]
-    return {"relationship": best, "evidence": evidence} if best else None
+        # "$275 billion market", "$1.6 trillion opportunity" are market sizes, not deal sizes.
+        if re.search(r"(?i)\b(?:market|tam|industry|opportunity|addressable|trillion|annually|per\s+year)\b", s) \
+                and not _AMOUNT_CONTEXT.search(s):
+            continue
+        candidates = []
+        for m in _SHARES_AT_PRICE.finditer(s):
+            candidates.append(float(m.group(1).replace(",", "")) * float(m.group(2).replace(",", "")))
+        if _AMOUNT_CONTEXT.search(s) or alias_re.search(s):
+            for m in _MONEY.finditer(s):
+                v = _money(m.group(1), m.group(2))
+                # Per-share prices and par values aren't deal sizes.
+                if v >= 1e6 and not re.match(r"\s*per\s+share", s[m.end():m.end() + 12], re.IGNORECASE):
+                    candidates.append(v)
+        for v in candidates:
+            if v < 5e11 and (best is None or v > best["amount_usd"]):
+                best = {"amount_usd": v, "amount_sentence": s[:400]}
+    return best
 
 
 def _fts(query: str, forms: str, start: str, end: str, session: requests.Session) -> List[Dict]:
@@ -229,20 +331,24 @@ _TICKER_RE = re.compile(r"\(([A-Z0-9.\-]{1,6})(?:,\s*[A-Z0-9.\-]+)*\)\s*\(CIK")
 
 
 def counterparty_deals(ticker: str, cik: str, start: str, end: str,
-                       session: requests.Session) -> List[Dict]:
+                       session: requests.Session, explain: bool = True) -> List[Dict]:
     aliases = aliases_for(ticker, cik, session)
     query = " OR ".join(f'"{a}"' for a in aliases)
     candidates = {}
     for h in _fts(query, "8-K", start, end, session):
-        if h["cik"].lstrip("0") == cik.lstrip("0") or h["file_type"] != "8-K":
+        if h["cik"].lstrip("0") == cik.lstrip("0"):
             continue
-        if not DEAL_ITEMS & set(h["items"]):
-            continue
-        candidates.setdefault(h["adsh"], h)
+        items = set(h["items"])
+        if DEAL_ITEMS & items and h["file_type"] == "8-K":
+            candidates[h["adsh"]] = {**h, "kind": "filing"}  # formal items win over a press release
+        elif ANNOUNCEMENT_ITEMS & items and (h["file_type"] or "").startswith("EX-99"):
+            candidates.setdefault(h["adsh"], {**h, "kind": "press_release"})
 
     deals = []
     titles = sec_utils_titles(session)
-    for h in sorted(candidates.values(), key=lambda h: h["file_date"], reverse=True)[:MAX_COUNTERPARTY_DOCS]:
+    ordered = sorted(candidates.values(), key=lambda h: (h["kind"] != "filing", h["file_date"]), reverse=False)
+    ordered = sorted(ordered[:MAX_COUNTERPARTY_DOCS], key=lambda h: h["file_date"], reverse=True)
+    for h in ordered:
         key = f"{AFTERMATH_VERSION}|{h['adsh']}|{'|'.join(aliases)}"
         result = db.cache_get("counterparty_doc", key, ttl_seconds=None)
         if result is None:
@@ -254,23 +360,151 @@ def counterparty_deals(ticker: str, cik: str, start: str, end: str,
                 text = sec_utils.html_to_text(resp.text)
             except requests.RequestException:
                 continue
-            result = classify_counterparty(_item_sections(text), aliases) or {}
+            # A press release has no Item headings — read its opening instead.
+            sections = _item_sections(text) if h["kind"] == "filing" else re.sub(r"\s+", " ", text)[:8000]
+            result = classify_counterparty(sections, aliases) or {}
+            if result.get("relationship"):
+                result.update(extract_amount(sections, aliases) or {})
             result["url"] = url
             db.cache_set("counterparty_doc", key, result)
         if not result.get("relationship"):
             continue
         m = _TICKER_RE.search(h["display_name"])
         cp_ticker = m.group(1) if m else None
+        relationship = result["relationship"]
+        if h["kind"] == "press_release" and relationship == "agreement":
+            relationship = "announced"
         deals.append({
-            "date": h["file_date"], "relationship": result["relationship"],
+            "date": h["file_date"], "relationship": relationship, "source_kind": h["kind"],
             "company": re.sub(r"\s*\(.*$", "", h["display_name"]).strip(),
             "ticker": cp_ticker, "sic": h["sic"], "industry": titles.get(h["sic"] or "", None),
             "items": h["items"], "evidence": result["evidence"], "url": result["url"],
             "return_12m_pct": _ret(cp_ticker, h["file_date"], _plus_days(h["file_date"], 365)),
             "return_to_today_pct": _ret(cp_ticker, h["file_date"], pit.today()),
             "spy_12m_pct": _ret("SPY", h["file_date"], _plus_days(h["file_date"], 365)),
+            "amount_usd": result.get("amount_usd"),
+            "amount_sentence": result.get("amount_sentence"),
         })
+    for d in deals:
+        if d.get("amount_usd") and d["ticker"]:
+            v = pit.valuation(d["ticker"], d["date"], session)
+            if v.get("market_cap") and d["amount_usd"] > 3 * v["market_cap"] and d["relationship"] != "agreement":
+                d["amount_usd"], d["amount_sentence"] = None, None  # implausible: likely a market size
+        d["why"] = (explain_move(d["ticker"], d["date"], session, d["relationship"], d.get("amount_usd"))
+                    if explain else None)
     return deals
+
+
+def explain_move(ticker: Optional[str], start: str, session: requests.Session,
+                 relationship: str = "", amount_usd: Optional[float] = None) -> Optional[Dict]:
+    """
+    Why did the counterparty's stock move after the deal? Splits the change
+    in market value into (a) reported revenue change and (b) re-rating —
+    the change in price/sales, i.e. what investors pay per dollar of sales
+    — next to the market's move, the company's size at the time and the
+    deal's size relative to it. The explanation is generated from these
+    numbers by fixed rules, not written by a model.
+    """
+    if not ticker:
+        return None
+    end = min(_plus_days(start, 365), pit.today())
+    r, spy = _ret(ticker, start, end), _ret("SPY", start, end)
+    if r is None:
+        return None
+    v0, v1 = pit.valuation(ticker, start, session), pit.valuation(ticker, end, session)
+    cik = sec_utils.get_cik_for_ticker(ticker, session)
+    q_end = pit.quarterly_revenue_yoy(cik, end, session) if cik else None
+    out = {"period_end": end, "return_pct": r, "spy_pct": spy,
+           "market_cap_at_deal": v0.get("market_cap"), "latest_quarter_revenue_yoy_pct": q_end,
+           "revenue_change_pct": None, "ps_start": None, "ps_end": None, "reasons": []}
+    same_fy = v0.get("fiscal_year_end") and v0.get("fiscal_year_end") == v1.get("fiscal_year_end")
+    if v0.get("sales_yield") and v1.get("sales_yield") and v0.get("market_cap") and v1.get("market_cap"):
+        rev0 = v0["sales_yield"] * v0["market_cap"]
+        rev1 = v1["sales_yield"] * v1["market_cap"]
+        # Same fiscal year at both dates = no new annual results yet, so a
+        # "revenue change" of 0% would be an artifact, not a fact.
+        if not same_fy:
+            out["revenue_change_pct"] = round((rev1 / rev0 - 1) * 100, 1) if rev0 else None
+        out["ps_start"], out["ps_end"] = round(1 / v0["sales_yield"], 1), round(1 / v1["sales_yield"], 1)
+    reasons = out["reasons"]
+
+    if spy is not None:
+        excess = r - spy
+        reasons.append(f"The S&P 500 moved {spy:+.0f}% over the same period, so the stock did "
+                       f"{abs(excess):.0f} points {'better' if excess >= 0 else 'worse'} than the market.")
+    if same_fy and out["ps_start"] and out["ps_end"]:
+        reasons.append(f"No new annual results came out in this window, so the move is investors re-pricing "
+                       f"the same reported sales: price/sales {out['ps_start']}x → {out['ps_end']}x"
+                       + (f", alongside {q_end:+.0f}% year-over-year growth in its latest quarter."
+                          if q_end is not None else "."))
+    elif out["revenue_change_pct"] is not None and out["ps_start"]:
+        rev_log = math.log1p(out["revenue_change_pct"] / 100) if out["revenue_change_pct"] > -100 else -9
+        ps_log = math.log(out["ps_end"] / out["ps_start"]) if out["ps_end"] and out["ps_start"] else 0
+        driver = ("re-rating — investors paid more per dollar of sales" if ps_log > 0 else
+                  "de-rating — investors paid less per dollar of sales")
+        if abs(ps_log) > abs(rev_log):
+            reasons.append(f"Mostly {driver}: price/sales went from {out['ps_start']}x to {out['ps_end']}x, "
+                           f"while reported annual revenue changed {out['revenue_change_pct']:+.0f}%.")
+        else:
+            reasons.append(f"Mostly the business itself: reported annual revenue changed "
+                           f"{out['revenue_change_pct']:+.0f}% (price/sales {out['ps_start']}x → {out['ps_end']}x).")
+    if q_end is not None and not same_fy:
+        reasons.append(f"Its latest reported quarter had revenue {q_end:+.0f}% vs a year earlier.")
+    e0, e1 = v0.get("earnings_yield"), v1.get("earnings_yield")
+    if e0 is not None and e1 is not None and (e0 < 0) != (e1 < 0):
+        reasons.append("It went from losing money to profitable." if e1 > 0
+                       else "It went from profitable to losing money.")
+    mcap = v0.get("market_cap")
+    if mcap:
+        size = (f"${mcap / 1e9:,.1f}B" if mcap >= 1e9 else f"${mcap / 1e6:,.0f}M" if mcap >= 1e6
+                else "under $1M")
+        if amount_usd:
+            reasons.append(f"The deal (${amount_usd / 1e9:,.2f}B) was {amount_usd / mcap * 100:.1f}% of its "
+                           f"{size} market value at the time." if amount_usd >= 1e9 else
+                           f"The deal (${amount_usd / 1e6:,.0f}M) was {amount_usd / mcap * 100:.1f}% of its "
+                           f"{size} market value at the time.")
+        if amount_usd and relationship in ("agreement", "announced") and amount_usd / mcap > 0.25:
+            reasons.append("A commitment that large relative to the company's own size usually has to be "
+                           "financed by issuing shares or taking on debt, which tends to weigh on the stock.")
+        if mcap < 2e9 and relationship in ("agreement", "announced"):
+            reasons.append(f"Small company ({size}) announcing an agreement with a giant: these "
+                           f"announcements often spike on the news and fade as the deal turns out "
+                           f"small or slow to produce revenue.")
+    return out
+
+
+def deal_patterns(deals: List[Dict]) -> Dict:
+    """
+    Pure function. Average 12-month return vs the S&P 500 grouped by deal
+    type and by the counterparty's size at the time — which kinds of deals
+    were followed by gains, and which by losses.
+    """
+    def summarize(rows):
+        xs = [d["return_12m_pct"] - d["spy_12m_pct"] for d in rows
+              if d.get("return_12m_pct") is not None and d.get("spy_12m_pct") is not None]
+        return {"deals": len(rows), "with_returns": len(xs),
+                "avg_vs_spy_pct": round(sum(xs) / len(xs), 1) if xs else None,
+                "share_beating_spy_pct": round(sum(1 for x in xs if x > 0) / len(xs) * 100) if xs else None}
+
+    def size(d):
+        m = (d.get("why") or {}).get("market_cap_at_deal")
+        return None if m is None else "under $2B" if m < 2e9 else "$2–20B" if m < 2e10 else "over $20B"
+
+    by_type = {k: summarize([d for d in deals if d["relationship"] == k])
+               for k in ("invested", "agreement", "announced")}
+    by_size = {k: summarize([d for d in deals if size(d) == k]) for k in ("under $2B", "$2–20B", "over $20B")}
+    notes = []
+    inv, agr = by_type["invested"], by_type["agreement"]
+    if inv["avg_vs_spy_pct"] is not None and agr["avg_vs_spy_pct"] is not None:
+        notes.append(f"Companies it invested in averaged {inv['avg_vs_spy_pct']:+.0f} pts vs the S&P 500 over "
+                     f"12 months; companies announcing agreements averaged {agr['avg_vs_spy_pct']:+.0f} pts.")
+    small = by_size["under $2B"]
+    if small["avg_vs_spy_pct"] is not None and small["with_returns"] >= 2:
+        notes.append(f"Small counterparties (under $2B) averaged {small['avg_vs_spy_pct']:+.0f} pts across "
+                     f"{small['with_returns']} deals. An investment means the giant put its own money in; an "
+                     f"\"agreement\" announced by a small company is often a customer or partner program "
+                     f"that gets a pop on the headline and fades.")
+    return {"by_type": by_type, "by_size": by_size, "notes": notes}
 
 
 def sec_utils_titles(session: requests.Session) -> Dict[str, str]:
@@ -406,7 +640,8 @@ def filing_aftermath(ticker: str, filing_date: str, session: Optional[requests.S
         "ticker": ticker, "filing_date": filing_date, "window_end": end,
         "window_complete": _plus_days(filing_date, WINDOW_DAYS) <= pit.today(),
         "stock": stock_after(ticker, filing_date),
-        "counterparty_deals": counterparty_deals(ticker, cik, filing_date, end, session),
+        "counterparty_deals": (deals := counterparty_deals(ticker, cik, filing_date, end, session)),
+        "deal_patterns": deal_patterns(deals),
         "own_deals": own_deals(cik, filing_date, end, session),
         "thirteen_f": thirteen_f_changes(cik, filing_date, end, session),
         "disclosed": disclosed_responses(cik, filing_date, end, session),

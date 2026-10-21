@@ -247,7 +247,12 @@ def html_to_text(html: str) -> str:
     filings split single words across <span>s, so words came out broken
     ("i nvestment") and regexes silently missed them.
     """
-    soup = BeautifulSoup(html, "lxml")
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except ValueError:
+        # Some filer-made press releases have malformed namespaced
+        # attributes that lxml rejects; the stdlib parser tolerates them.
+        soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style"]):
         tag.decompose()
     for tag in soup.find_all(_BLOCK_TAGS):

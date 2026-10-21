@@ -262,6 +262,11 @@ def detect_own_tightness(mda_text: str) -> Dict:
             continue
         if _COST_CONTEXT.search(sent) and not re.search(r"(?i)\bsupply\b", sent):
             continue
+        # Financial-table rows flattened into text ("Fiscal Years Ended
+        # (Dollars in millions) ... Change % Change ...") aren't statements.
+        if re.search(r"(?i)\((?:dollars\s+)?in\s+(?:millions|thousands)", sent) or \
+                sum(ch.isdigit() for ch in sent) > len(sent) * 0.12:
+            continue
         seen.add(sent)
         hits.append(sent[:400])
     return {"mentions": len(hits), "evidence": hits[:3]}
@@ -276,7 +281,7 @@ def scan_own_filing(content: str, form: str) -> Dict:
     return detect_own_tightness(mda)
 
 
-TIGHTNESS_CACHE_VERSION = "v1"
+TIGHTNESS_CACHE_VERSION = "v2"
 
 
 def supplier_tightness(ticker: str, as_of: str, session: requests.Session) -> Optional[Dict]:

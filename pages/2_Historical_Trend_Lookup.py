@@ -74,6 +74,11 @@ def _fetch_aftermath(ticker: str, filing_date: str) -> Optional[Dict]:
         return None
 
 
+def _md(text: str) -> str:
+    """Escape $ so Streamlit doesn't render the text between two of them as math."""
+    return (text or "").replace("$", "\\$")
+
+
 def _pct(v) -> str:
     return f"{v:+.1f}%" if v is not None else "—"
 
@@ -103,7 +108,10 @@ def _render_aftermath(am: Dict):
                    "smaller company, which must disclose it.")
         st.dataframe(pd.DataFrame([{
             "Date": d["date"],
-            "What": "💰 Invested in them" if d["relationship"] == "invested" else "🤝 Agreement",
+            "What": {"invested": "💰 Invested in them", "agreement": "🤝 Agreement",
+                     "announced": "📣 Announced (press release)"}.get(d["relationship"], d["relationship"]),
+            "Deal size stated": (f"${d['amount_usd'] / 1e9:,.2f}B" if (d.get("amount_usd") or 0) >= 1e9
+                                 else f"${d['amount_usd'] / 1e6:,.0f}M" if d.get("amount_usd") else "—"),
             "Company": d["company"], "Ticker": d["ticker"] or "—", "Industry": d["industry"] or "—",
             "Their stock, next 12m": _pct(d["return_12m_pct"]),
             "S&P 500, same 12m": _pct(d["spy_12m_pct"]),
@@ -111,9 +119,21 @@ def _render_aftermath(am: Dict):
             "Filing": d["url"],
         } for d in deals]), width="stretch", hide_index=True,
             column_config={"Filing": st.column_config.LinkColumn("Filing", display_text="8-K")})
-        with st.expander("What each filing says"):
-            for d in deals:
-                st.markdown(f"**{d['date']} · {d['company']}**: “{d['evidence']}”")
+        for note in am.get("deal_patterns", {}).get("notes", []):
+            st.info(note)
+        st.markdown("**Why each stock moved afterwards**")
+        for d in deals:
+            why = d.get("why") or {}
+            with st.expander(f"{d['date']} · {d['company']} ({d['ticker'] or 'private'}) · "
+                             f"{_pct(d['return_12m_pct'] if d['return_12m_pct'] is not None else d['return_to_today_pct'])}"):
+                st.markdown(f"“{_md(d['evidence'])}”")
+                if d.get("amount_sentence"):
+                    st.caption("Amount from: " + _md(d["amount_sentence"]))
+                for r in why.get("reasons", []):
+                    st.markdown(f"- {_md(r)}")
+                if not why:
+                    st.caption("No price data to explain the move (private or recently listed company).")
+                st.markdown(f"[Read the filing]({d['url']})")
     else:
         st.caption("No other company's 8-K named it as an investor or counterparty in this period.")
 
@@ -138,17 +158,17 @@ def _render_aftermath(am: Dict):
     st.markdown("**Did it fix it in-house, and say so?**")
     cap = am.get("capex")
     if cap and cap["change_pct"] is not None:
-        st.write(f"CapEx: ${cap['before_usd'] / 1e9:,.1f}B (FY ending {cap['before_fy']}) → "
-                 f"${cap['after_usd'] / 1e9:,.1f}B (FY ending {cap['after_fy']}), **{cap['change_pct']:+.0f}%**.")
+        st.markdown(f"CapEx: \\${cap['before_usd'] / 1e9:,.1f}B (FY ending {cap['before_fy']}) → "
+                    f"\\${cap['after_usd'] / 1e9:,.1f}B (FY ending {cap['after_fy']}), **{cap['change_pct']:+.0f}%**.")
     disc = am["disclosed"]
     if disc["in_house"]:
         st.markdown("*Building or doing it itself:*")
         for x in disc["in_house"]:
-            st.write(f"> {x['sentence']}  \n— {x['form']} filed {x['date']}")
+            st.markdown(f"> {_md(x['sentence'])}  \n— {x['form']} filed {x['date']}")
     if disc["secured_supply"]:
         st.markdown("*Securing supply by contract (prepayments, long-term supply / power agreements):*")
         for x in disc["secured_supply"]:
-            st.write(f"> {x['sentence']}  \n— {x['form']} filed {x['date']}")
+            st.markdown(f"> {_md(x['sentence'])}  \n— {x['form']} filed {x['date']}")
     if not disc["in_house"] and not disc["secured_supply"]:
         st.caption("No in-house or secured-supply statements found in its filings from this period.")
 
@@ -172,10 +192,12 @@ elif ticker_input:
     stored = _fetch_stored(ticker_input)
     if stored:
         st.caption(f"Showing previously computed results for {ticker_input}. Click the button above to refresh.")
-        result = {"ticker": ticker_input, "signal_trend": stored["signal_trend"], "capex_trend": []}
+        result = {"ticker": ticker_input, "signal_trend": stored["signal_trend"], "capex_trend": [],
+                  "filings": stored.get("filings", [])}
 
 if result and result.get("signal_trend") is not None:
     trend = result["signal_trend"]
+    df = pd.DataFrame(trend, columns=["fiscal_year_end", "category", "confidence", "evidence"])
     if not trend:
         st.info(
             f"No bottleneck-style language was detected in any of {ticker_input}'s "
@@ -186,7 +208,7 @@ if result and result.get("signal_trend") is not None:
             f"concluding either way."
         )
     else:
-        df = pd.DataFrame(trend).sort_values("fiscal_year_end")
+        df = df.sort_values("fiscal_year_end")
         fig = px.scatter(
             df, x="fiscal_year_end", y="confidence", color="category",
             size="confidence", hover_data=["evidence"],
@@ -195,6 +217,7 @@ if result and result.get("signal_trend") is not None:
         fig.update_layout(yaxis_range=[0, 1.05])
         st.plotly_chart(fig, width="stretch")
 
+    if True:  # every checked filing, with or without signals
         st.markdown("### Each filing, and what happened next")
         st.caption(
             "For every 10-K: what it said, then over the following 12 months, how the stock did, "
@@ -202,7 +225,8 @@ if result and result.get("signal_trend") is not None:
             "what it disclosed doing in-house. The link between a deal and the bottleneck is "
             "inferred from timing and wording; companies rarely say \"we invested in X to fix Y\"."
         )
-        filing_dates = sorted(df["fiscal_year_end"].unique(), reverse=True)
+        filing_dates = sorted(set(result.get("filings") or []) | set(df["fiscal_year_end"].unique()),
+                              reverse=True)
         if st.button("Load “what happened next” for every year",
                      help="About 10–60 seconds per year on first load; cached afterwards."):
             for fd in filing_dates:
@@ -211,10 +235,13 @@ if result and result.get("signal_trend") is not None:
         for fd in filing_dates:
             year_rows = df[df["fiscal_year_end"] == fd].sort_values("confidence", ascending=False)
             st.markdown(f"#### 10-K filed {fd}")
-            st.caption(" · ".join(f"{r['category']} ({r['confidence']:.0%})" for _, r in year_rows.iterrows()))
-            with st.expander("What the filing said"):
-                for _, row in year_rows.iterrows():
-                    st.markdown(f"**{row['category']}** ({row['confidence']:.0%}): “{row['evidence']}”")
+            if year_rows.empty:
+                st.caption("No bottleneck language detected in this filing.")
+            else:
+                st.caption(" · ".join(f"{r['category']} ({r['confidence']:.0%})" for _, r in year_rows.iterrows()))
+                with st.expander("What the filing said"):
+                    for _, row in year_rows.iterrows():
+                        st.markdown(f"**{row['category']}** ({row['confidence']:.0%}): “{_md(row['evidence'])}”")
             key = f"aftermath_{ticker_input}_{fd}"
             if not st.session_state.get(key):
                 if st.button("📈 What happened next?", key=f"btn_{key}"):

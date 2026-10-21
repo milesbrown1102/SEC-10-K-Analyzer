@@ -27,7 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import (
-    aftermath, backtest, bottleneck_detector, db, historical_pipeline, industry_radar, insider_trading,
+    aftermath, backtest, bottleneck_detector, company_profile, db, historical_pipeline, industry_radar, insider_trading,
+    opportunities,
     institutional_holdings, point_in_time, radar_backtest, scanner_pipeline, scoring, sec_utils,
 )
 
@@ -160,7 +161,8 @@ def get_historical(ticker: str):
             status_code=404,
             detail=f"No historical trend computed for '{ticker}' yet — POST /historical/run first",
         )
-    return {"ticker": ticker.strip().upper(), "signal_trend": trend}
+    return {"ticker": ticker.strip().upper(), "signal_trend": trend,
+            "filings": historical_pipeline.get_stored_filings(ticker)}
 
 
 # =============================================================================
@@ -502,6 +504,81 @@ def latest_radar_backtest():
 
 
 # =============================================================================
+# Opportunities — industries ranked on giants' money, scarcity, funds,
+# insiders. Background task (first run follows six giants' deals: ~3 min).
+# =============================================================================
+
+_opp_lock = threading.Lock()
+_opp_state = {"in_progress": False, "error": None, "done": 0, "total": 0, "stage": None}
+
+
+def _run_opportunities_background():
+    def progress(done, total, current, stage):
+        _opp_state.update(done=done, total=total, stage=stage)
+    try:
+        opportunities.run_opportunities(progress=progress)
+        _opp_state["error"] = None
+    except Exception as e:
+        _opp_state["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with _opp_lock:
+            _opp_state["in_progress"] = False
+
+
+@app.post("/opportunities/run")
+def start_opportunities(background_tasks: BackgroundTasks):
+    with _opp_lock:
+        if _opp_state["in_progress"]:
+            raise HTTPException(status_code=409, detail="Already running.")
+        _opp_state.update(in_progress=True, error=None, done=0, total=0, stage=None)
+    background_tasks.add_task(_run_opportunities_background)
+    return {"status": "started"}
+
+
+@app.get("/opportunities/status")
+def opportunities_status():
+    report = opportunities.get_latest_report()
+    return {**_opp_state, "generated_at": report["generated_at"] if report else None}
+
+
+@app.get("/opportunities/latest")
+def latest_opportunities():
+    report = opportunities.get_latest_report()
+    if not report:
+        raise HTTPException(status_code=404, detail="No opportunities report yet")
+    return report
+
+
+@app.get("/company/{ticker}/profile")
+def company_profile_endpoint(ticker: str):
+    """Everything about one company: what it does, funds and when they bought, insiders,
+    connections, buy score, and a case for / against built from the evidence."""
+    result = company_profile.build_profile(ticker)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/prices/{ticker}")
+def prices(ticker: str, years: float = 3.0):
+    """Daily adjusted closes (weekly when the range is over 2 years), plus SPY over the same range."""
+    from datetime import date, timedelta
+    start = (date.today() - timedelta(days=int(365 * years))).isoformat()
+
+    def series(t):
+        hist = point_in_time.price_history(t.upper())
+        rows = [(d, v["adj_close"]) for d, v in sorted(hist.items()) if d >= start]
+        if years > 2:
+            rows = rows[::5]
+        return [{"date": d, "close": round(c, 4)} for d, c in rows]
+
+    data = series(ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"No price history for '{ticker}'")
+    return {"ticker": ticker.upper(), "prices": data, "spy": series("SPY")}
+
+
+# =============================================================================
 # Weekly auto-refresh. Runs inside the backend (a WSL cron job would only
 # fire while WSL happens to be open): every 30 minutes, anything older than
 # REFRESH_AFTER_DAYS is refreshed, one job at a time, in the background.
@@ -563,14 +640,25 @@ def _scheduled_jobs():
         threading.Thread(target=_run_insiders_background, daemon=True).start()
         return True
 
+    def start_opportunities_job():
+        with _opp_lock:
+            if _opp_state["in_progress"]:
+                return False
+            _opp_state.update(in_progress=True, error=None)
+        threading.Thread(target=_run_opportunities_background, daemon=True).start()
+        return True
+
     inst = institutional_holdings.get_latest_report()
     radar = industry_radar.get_latest_report()
+    opp = opportunities.get_latest_report()
     loaded = insider_trading.loaded_quarters()
     return [
         ("scan", _latest_completed_scan_ts(), start_scan),
         ("13f", inst["generated_at"] if inst else None, start_13f),
         ("radar", radar["generated_at"] if radar else None, start_radar),
         ("insiders", max((q["loaded_at"] for q in loaded.values()), default=None), start_insiders),
+        # Last, so it runs on fresh radar / 13F / insider inputs.
+        ("opportunities", opp["generated_at"] if opp else None, start_opportunities_job),
     ]
 
 
